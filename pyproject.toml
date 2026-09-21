@@ -3,18 +3,13 @@ name = "file-bridge"
 version = "0.1.0"
 description = "Dingding bot stream backend."
 readme = "README.md"
-authors = [
-    { name = "Liu", email = "5467193+ninetymiles@users.noreply.github.com" }
-]
+
 requires-python = ">=3.14"
 dependencies = [
+    "dingtalk-stream>=0.24.3",
     "fastapi>=0.141.1",
     "python-dotenv>=1.2.3",
 ]
 
-[project.scripts]
-file-bridge = "file_bridge:main"
-
-[build-system]
-requires = ["uv_build>=0.12.17,<0.13.0"]
-build-backend = "uv_build"
+[tool.uv]
+package = false
