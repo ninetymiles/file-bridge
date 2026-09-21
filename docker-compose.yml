@@ -1,0 +1,16 @@
+services:
+  bridge:
+    build: .
+    image: ${IMAGE_TAG:-file-bridge:latest}
+    container_name: file-bridge
+    restart: unless-stopped
+    volumes:
+      - ./out:/out
+    env_file:
+      - .env
+    healthcheck:
+      test: python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:${UVICORN_PORT:-8000}/api/v1/health', timeout=5)"
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
