@@ -13,4 +13,5 @@ wheels/
 AGENTS.local.md
 docker-compose.override.yml
 third-party/
+output/
 
