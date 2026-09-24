@@ -18,6 +18,8 @@
 
 ```shell
 $ uv run uvicorn app.main:app
+$ uv run app/main.py
+$ uv run python -m app.main
 ```
 
 默认监听 127.0.0.1:8000，可通过参数 --host 0.0.0.0 --port 8000 或环境变量 UVICORN_HOST=0.0.0.0 UVICORN_PORT=8000 指定监听地址和端口
