@@ -3,10 +3,10 @@
 - [ ] 1.1 在 `pyproject.toml` 中添加 `uvicorn` 依赖，并通过 `uv sync` 验证环境同步
 - [ ] 1.2 在 `app/main.py` 中初始化 `FastAPI` 实例并编写 `/api/v1/health` 健康检查接口，使用 TestClient 编写单元测试验证返回 200
 
-## 2. Lifespan 与机器人服务生命周期打通
+## 2. Lifespan 钩子消费 BotService
 
-- [ ] 2.1 将机器人服务封装为可异步 `start()` 和 `stop()` 的 `BotService`
-- [ ] 2.2 在 FastAPI 的 `lifespan` 上下文中集成 `BotService`，验证随着应用启停正确拉起和回收 Stream 客户端
+- [ ] 2.1 在 `app/main.py` 中实现 `@asynccontextmanager lifespan(app: FastAPI)`，startup 阶段调用 `await create_bot_service().start()`，shutdown 阶段在 `finally` 块调用 `await app.state.bot_service.stop()`，验证随着应用启停正确拉起和回收 Stream 客户端（依赖 `fix-graceful-shutdown-stuck-on-reconnect` Phase 2 已落地）
+- [ ] 2.2 编写单元测试覆盖 lifespan 钩子：mock `BotService` 验证 `start()` 在 startup 阶段被调用、`stop()` 在 shutdown 阶段被调用且至少执行一次（idempotent）
 
 ## 3. 部署与容器配置更新
 

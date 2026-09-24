@@ -1,10 +1,4 @@
-# lifecycle-management Specification
-
-## Purpose
-
-规范机器人运行时的生命周期管理，提供进程信号拦截与优雅停机支持，并在服务启动上线与停机离线时执行受控的状态通知。
-
-## Requirements
+## MODIFIED Requirements
 
 ### Requirement: 信号拦截与优雅停机
 系统 SHALL 拦截并统一处理操作系统的中断信号（`SIGINT`）与终止信号（`SIGTERM`），执行受控的停机流程并正常退出。停机序列 SHALL 优先调用底层 Stream 客户端的 `stop()` 以显式设置 SDK 内部停止标志，再关闭 websocket 与取消运行任务，避免被 SDK 视为网络异常而触发自动重连。
@@ -25,20 +19,7 @@
 - **WHEN** 优雅停机开始且 SDK 内部的 websocket 连接被关闭
 - **THEN** 系统 SHALL 已先行调用 `client.stop()` 设置 SDK 的 `_stop_event`，使 SDK 的 reconnect 循环（`while not self._stop_event.is_set()`）正常退出，不被视为网络异常触发重连
 
-### Requirement: 上线与离线主动通知
-系统 SHALL 支持在服务启动就绪后及停机清理前向预设的钉钉会话发送状态通知，且在未配置目标时保持静默。
-
-#### Scenario: 配置了通知目标时的上线通知
-- **WHEN** 配置了有效的群聊 ID 或单聊用户 ID 且服务初始化就绪
-- **THEN** 系统向指定会话发送“服务已上线”的主动通知消息
-
-#### Scenario: 配置了通知目标时的离线通知
-- **WHEN** 配置了有效的群聊 ID 或单聊用户 ID 且接收到停机信号
-- **THEN** 系统在断开长连接前向指定会话发送“服务正在离线”的主动通知消息
-
-#### Scenario: 未配置通知目标时的静默处理
-- **WHEN** 未配置任何通知目标（既无群聊 ID 亦无单聊用户 ID）
-- **THEN** 系统跳过上下线通知发送流程，不记录错误且不阻断应用的正常启动和停机
+## ADDED Requirements
 
 ### Requirement: 离线通知的非阻塞性
 系统在优雅停机序列中发送离线通知 SHALL 采用 fire-and-forget 模式，通知发送的成败或超时 SHALL NOT 阻塞或延缓 SDK 停止与 websocket 关闭的关键路径。

@@ -9,7 +9,7 @@ from lib.config import parse_config, AppConfig
 from lib.metadata_store import MetadataStore
 from lib.file_downloader import FileDownloader
 from lib.lifecycle_notifier import LifecycleNotifier
-from lib.runner import BotRunner
+from lib.runner import BotService
 from lib.handlers import (
     PipelineHandler,
     CommandHandler,
@@ -78,8 +78,8 @@ def main(args=None):
         notify_user_id=config.notify_user_id,
         logger=logger,
     )
-    runner = BotRunner(client=client, notifier=notifier, logger=logger)
-    runner.start_forever()
+    runner = BotService(client=client, notifier=notifier, logger=logger)
+    runner.run_forever()
 
 
 if __name__ == '__main__':
