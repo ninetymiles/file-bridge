@@ -16,6 +16,8 @@ class AppConfig:
     client_id: str
     client_secret: str
     output_dir: str = DEFAULT_OUTPUT_DIR
+    notify_conversation_id: Optional[str] = None
+    notify_user_id: Optional[str] = None
 
 
 def get_argument_parser() -> argparse.ArgumentParser:
@@ -39,6 +41,20 @@ def get_argument_parser() -> argparse.ArgumentParser:
         default=None,
         help='Directory for media file storage and metadata database'
     )
+    parser.add_argument(
+        '--notify-conversation-id',
+        '--notify_conversation_id',
+        dest='notify_conversation_id',
+        default=None,
+        help='DingTalk openConversationId to send lifecycle online/offline notifications'
+    )
+    parser.add_argument(
+        '--notify-user-id',
+        '--notify_user_id',
+        dest='notify_user_id',
+        default=None,
+        help='DingTalk userId (staffId) to send lifecycle online/offline notifications'
+    )
     return parser
 
 
@@ -54,9 +70,13 @@ def parse_config(args: Optional[List[str]] = None) -> AppConfig:
         parser.error('client_id and client_secret must be set via command-line arguments or environment variables (CLIENT_ID, CLIENT_SECRET)')
 
     output_dir = options.output_dir or os.getenv('OUTPUT_DIR') or DEFAULT_OUTPUT_DIR
+    notify_conversation_id = options.notify_conversation_id or os.getenv('NOTIFY_CONVERSATION_ID')
+    notify_user_id = options.notify_user_id or os.getenv('NOTIFY_USER_ID')
 
     return AppConfig(
         client_id=client_id,
         client_secret=client_secret,
         output_dir=output_dir,
+        notify_conversation_id=notify_conversation_id,
+        notify_user_id=notify_user_id,
     )

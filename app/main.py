@@ -8,6 +8,8 @@ import dotenv
 from lib.config import parse_config, AppConfig
 from lib.metadata_store import MetadataStore
 from lib.file_downloader import FileDownloader
+from lib.lifecycle_notifier import LifecycleNotifier
+from lib.runner import BotRunner
 from lib.handlers import (
     PipelineHandler,
     CommandHandler,
@@ -68,7 +70,15 @@ def main(args=None):
 
     pipeline = create_pipeline(config.output_dir, client, logger)
     client.register_callback_handler(dingtalk_stream.chatbot.ChatbotMessage.TOPIC, pipeline)
-    client.start_forever()
+
+    notifier = LifecycleNotifier(
+        dingtalk_client=client,
+        notify_conversation_id=config.notify_conversation_id,
+        notify_user_id=config.notify_user_id,
+        logger=logger,
+    )
+    runner = BotRunner(client=client, notifier=notifier, logger=logger)
+    runner.start_forever()
 
 
 if __name__ == '__main__':
