@@ -1,6 +1,7 @@
 """Message handlers and pipeline implementation for DingTalk stream bot."""
 
 import asyncio
+import json
 import logging
 import os
 from abc import ABC, abstractmethod
@@ -28,8 +29,9 @@ class BaseMessageHandler(ABC):
 class CommandHandler(BaseMessageHandler):
     """Handler for command-based chatbot text messages."""
 
-    def __init__(self, metadata_store):
+    def __init__(self, metadata_store, logger: Optional[logging.Logger] = None):
         self.metadata_store = metadata_store
+        self.logger = logger or logging.getLogger(__name__)
 
     async def handle(
         self,
@@ -51,6 +53,7 @@ class CommandHandler(BaseMessageHandler):
 
         # Check for '重建索引' command
         if "重建索引" in content:
+            self.logger.info("Command matched: 重建索引")
             cleaned_count, remaining_count = await self.metadata_store.async_rebuild_index()
             response_text = f"索引重建完成，清理元数据 {cleaned_count} 条，现有有效索引 {remaining_count} 条。"
             await pipeline.async_reply_text(response_text, message)
@@ -114,12 +117,14 @@ class MediaFileHandler(BaseMessageHandler):
 
         download_result = None
         try:
+            self.logger.info(f"Processing {msgtype} message: filename={original_filename}")
             download_url = await self.file_downloader.get_download_url(download_code)
             download_result = await self.file_downloader.download_file_stream(download_url)
 
             # Check for duplicate
             is_dup = await self.metadata_store.async_is_duplicate(download_result.sha256)
             if is_dup:
+                self.logger.info(f"Duplicate file detected (sha256={download_result.sha256}), skipping save")
                 if os.path.exists(download_result.temp_path):
                     try:
                         os.remove(download_result.temp_path)
@@ -148,6 +153,10 @@ class MediaFileHandler(BaseMessageHandler):
                 saved_path=saved_path,
                 sha256=download_result.sha256,
                 file_size=download_result.file_size,
+            )
+
+            self.logger.info(
+                f"File saved: {saved_path} (sha256={download_result.sha256}, size={download_result.file_size})"
             )
 
             saved_filename = os.path.basename(saved_path)
@@ -234,6 +243,11 @@ class PipelineHandler(dingtalk_stream.ChatbotHandler):
         """Process callback message through the pipeline."""
         raw_data = callback.data or {}
         incoming_message = ChatbotMessage.from_dict(raw_data)
+
+        sender = incoming_message.sender_nick or raw_data.get("senderNick") or "unknown"
+        msg_type = incoming_message.message_type or raw_data.get("msgtype") or "unknown"
+        self.logger.info(f"Received message from {sender}, type={msg_type}")
+        self.logger.debug("Message raw data: %s", json.dumps(raw_data, ensure_ascii=False, indent=2, default=str))
 
         for handler in self.handlers:
             try:

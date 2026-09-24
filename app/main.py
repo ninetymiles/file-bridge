@@ -21,6 +21,7 @@ dotenv.load_dotenv()
 
 
 def setup_logger():
+    logging.basicConfig(level=logging.DEBUG)
     logger = logging.getLogger("file-bridge")
     if not logger.handlers:
         handler = logging.StreamHandler()
@@ -47,7 +48,7 @@ def create_pipeline(
 
     pipeline = PipelineHandler(
         handlers=[
-            CommandHandler(metadata_store=metadata_store),
+            CommandHandler(metadata_store=metadata_store, logger=logger),
             MediaFileHandler(
                 output_dir=output_dir,
                 metadata_store=metadata_store,
