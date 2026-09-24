@@ -52,7 +52,7 @@ def generate_saved_filename(
 
     ts = timestamp or datetime.now()
     # Format timestamp with milliseconds: YYYYMMDDHHmmss_fff
-    time_str = ts.strftime("%Y%m%d%H%M%S_%f")[:18]
+    time_str = ts.strftime("%Y%m%d_%H%M%S_%f")[:18]
 
     return f"[{clean_sender}]_{time_str}{clean_ext}"
 
