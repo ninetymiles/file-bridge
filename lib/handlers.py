@@ -115,11 +115,19 @@ class MediaFileHandler(BaseMessageHandler):
             self.logger.warning(f"No downloadCode found in {msgtype} message")
             return False
 
+        # Shutdown checkpoint: abandon before starting any download work.
+        if pipeline.is_draining():
+            self.logger.info(f"Shutdown in progress; abandoning {msgtype} message before download.")
+            return True
+
         download_result = None
         try:
             self.logger.info(f"Processing {msgtype} message: filename={original_filename}")
             download_url = await self.file_downloader.get_download_url(download_code)
             download_result = await self.file_downloader.download_file_stream(download_url)
+            # Sync marker before any await: past this point the task always
+            # finishes save/commit/reply, even during shutdown drain.
+            pipeline.mark_download_done()
 
             # Check for duplicate
             is_dup = await self.metadata_store.async_is_duplicate(download_result.sha256)
@@ -163,6 +171,13 @@ class MediaFileHandler(BaseMessageHandler):
             await pipeline.async_reply_text(f"文件接收成功，已保存为: {saved_filename}", message)
             return True
 
+        except asyncio.CancelledError:
+            # Drain cancelled the download (temp file already removed by the
+            # downloader's BaseException cleanup): reply cancellation, then
+            # re-raise so the task terminates as cancelled — never swallow it.
+            self.logger.info(f"Download of {msgtype} interrupted by shutdown.")
+            await pipeline.async_reply_text("服务正在关闭，下载任务已取消", message)
+            raise
         except Exception as e:
             self.logger.error(f"Failed to process media message ({msgtype}): {e}", exc_info=True)
             if download_result and os.path.exists(download_result.temp_path):
@@ -229,6 +244,11 @@ class PipelineHandler(dingtalk_stream.ChatbotHandler):
             self.logger = logger
         else:
             self.logger = logging.getLogger(__name__)
+        # Shutdown drain state: in-flight message tasks keyed by task object,
+        # value = download_done event (set once the task is past its download
+        # point and must no longer be cancelled).
+        self._draining = False
+        self._active_tasks: dict[asyncio.Task, asyncio.Event] = {}
 
     def add_handler(self, handler: BaseMessageHandler) -> "PipelineHandler":
         """Append a handler to the pipeline."""
@@ -239,8 +259,68 @@ class PipelineHandler(dingtalk_stream.ChatbotHandler):
         """Send a text reply asynchronously in a worker thread."""
         return await asyncio.to_thread(self.reply_text, text, incoming_message)
 
+    def is_draining(self) -> bool:
+        """Return True after the shutdown intake gate has been closed."""
+        return self._draining
+
+    def begin_drain(self) -> None:
+        """Close the intake gate: incoming messages are acked but not processed."""
+        self._draining = True
+        self.logger.info("Intake gate closed; incoming messages will be acked without processing.")
+
+    def mark_download_done(self) -> None:
+        """Mark the calling task as past its download point (commit phase).
+
+        Must be called immediately after download_file_stream returns and
+        before any await: the drain's sync cancel loop then never selects
+        this task, so save/commit/reply always run to completion.
+        """
+        done_event = self._active_tasks.get(asyncio.current_task())
+        if done_event is not None:
+            done_event.set()
+
+    async def drain_active_tasks(self, timeout: float = 10.0) -> None:
+        """Cancel tasks before their download point, then wait (bounded) for all.
+
+        Tasks whose download_done event is set are left untouched: they finish
+        saving, committing and replying naturally. The cancel loop is pure
+        synchronous code (no await between the event check and cancel), so a
+        task that just marked download_done can never be cancelled.
+        """
+        snapshot = dict(self._active_tasks)
+        if not snapshot:
+            return
+        for task, done_event in snapshot.items():
+            if not done_event.is_set() and not task.done():
+                task.cancel()
+        _, pending = await asyncio.wait(snapshot.keys(), timeout=timeout)
+        if pending:
+            self.logger.info(
+                "Drain timeout after %.1fs; abandoning %d unfinished task(s) "
+                "(they die with the process exit).",
+                timeout,
+                len(pending),
+            )
+
     async def process(self, callback: CallbackMessage) -> Tuple[int, str]:
-        """Process callback message through the pipeline."""
+        """Process callback message through the pipeline.
+
+        Shutdown-aware wrapper: after begin_drain() the intake gate acks
+        without processing; every in-flight task registers itself (with its
+        download_done event) and deregisters in finally, whatever way it ends.
+        """
+        if self._draining:
+            return AckMessage.STATUS_OK, "OK"
+
+        task = asyncio.current_task()
+        self._active_tasks[task] = asyncio.Event()
+        try:
+            return await self._dispatch(callback)
+        finally:
+            self._active_tasks.pop(task, None)
+
+    async def _dispatch(self, callback: CallbackMessage) -> Tuple[int, str]:
+        """Run the handler chain for one message."""
         raw_data = callback.data or {}
         incoming_message = ChatbotMessage.from_dict(raw_data)
 

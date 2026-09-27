@@ -114,7 +114,9 @@ class FileDownloader:
                 sha256=hasher.hexdigest(),
                 file_size=file_size,
             )
-        except Exception:
+        except BaseException:
+            # BaseException, not just Exception: CancelledError raised by the
+            # shutdown drain must also clean up the temp file before propagating.
             if os.path.exists(temp_file_path):
                 try:
                     os.remove(temp_file_path)

@@ -125,7 +125,7 @@ def main(args=None):
         notify_user_id=config.notify_user_id,
         logger=logger,
     )
-    runner = BotService(client=client, notifier=notifier, logger=logger)
+    runner = BotService(client=client, notifier=notifier, logger=logger, pipeline=pipeline)
     runner.run_forever()
 
 

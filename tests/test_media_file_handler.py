@@ -29,6 +29,7 @@ async def test_media_file_handler_new_file(tmp_path):
     mock_store.async_insert_record = AsyncMock(return_value=1)
 
     mock_pipeline = MagicMock(spec=PipelineHandler)
+    mock_pipeline.is_draining.return_value = False
     mock_pipeline.async_reply_text = AsyncMock()
 
     handler = MediaFileHandler(
@@ -86,6 +87,7 @@ async def test_media_file_handler_duplicate_file(tmp_path):
     mock_store.async_insert_record = AsyncMock()
 
     mock_pipeline = MagicMock(spec=PipelineHandler)
+    mock_pipeline.is_draining.return_value = False
     mock_pipeline.async_reply_text = AsyncMock()
 
     handler = MediaFileHandler(
@@ -135,6 +137,7 @@ async def test_media_file_handler_video(tmp_path):
     mock_store.async_insert_record = AsyncMock(return_value=2)
 
     mock_pipeline = MagicMock(spec=PipelineHandler)
+    mock_pipeline.is_draining.return_value = False
     mock_pipeline.async_reply_text = AsyncMock()
 
     handler = MediaFileHandler(

@@ -10,10 +10,13 @@ FastAPI.
 import asyncio
 import logging
 import signal
-from typing import Optional
+from typing import Optional, TYPE_CHECKING
 import dingtalk_stream
 
 from lib.lifecycle_notifier import LifecycleNotifier
+
+if TYPE_CHECKING:
+    from lib.handlers import PipelineHandler
 
 
 class BotService:
@@ -23,8 +26,10 @@ class BotService:
 
     - :meth:`start`: construct the runtime, send online notification, launch
       the SDK background task and register ``SIGINT``/``SIGTERM`` handlers.
-    - :meth:`stop`: run the graceful shutdown sequence (``runner_task.cancel()``
-      with a bounded wait -> fire-and-forget offline notify -> close ws).
+    - :meth:`stop`: run the graceful shutdown sequence (close the pipeline
+      intake gate and drain in-flight message tasks with a bounded wait ->
+      ``runner_task.cancel()`` with a bounded wait -> fire-and-forget
+      offline notify -> close ws).
 
     Callers may also use :meth:`start_and_wait` for the convenience of waiting
     until a stop signal arrives, or :meth:`run_forever` for a synchronous
@@ -36,9 +41,11 @@ class BotService:
         client: dingtalk_stream.DingTalkStreamClient,
         notifier: Optional[LifecycleNotifier] = None,
         logger: Optional[logging.Logger] = None,
+        pipeline: Optional["PipelineHandler"] = None,
     ):
         self.client = client
         self.notifier = notifier
+        self.pipeline = pipeline
         self.logger = logger or logging.getLogger("file-bridge.runner")
         self._stop_event: Optional[asyncio.Event] = None
         self._runner_task: Optional[asyncio.Task] = None
@@ -79,14 +86,19 @@ class BotService:
 
         Order is significant:
 
-        1. ``runner_task.cancel()`` - cancel the SDK task; the websocket
+        1. Close the pipeline intake gate and drain in-flight message tasks:
+           tasks before their download point are cancelled (they reply
+           "cancelled" themselves); tasks past it finish saving, committing
+           and replying naturally. Bounded 10s wait — it returns as soon as
+           all tasks finish, the timeout is only a safety ceiling.
+        2. ``runner_task.cancel()`` - cancel the SDK task; the websocket
            closes when the SDK's connection context exits on cancellation.
            Await with a 1s bounded timeout: a grace period for network close,
            not for the SDK's internal reconnect sleep.
-        2. Fire-and-forget offline notification - failure must not block
+        3. Fire-and-forget offline notification - failure must not block
            shutdown.
-        3. Close websocket if still open (defensive).
-        4. Brief ``await asyncio.sleep(0.1)`` to give the event loop a chance
+        4. Close websocket if still open (defensive).
+        5. Brief ``await asyncio.sleep(0.1)`` to give the event loop a chance
            to schedule the fire-and-forget notification task before the loop
            tears down.
 
@@ -100,7 +112,14 @@ class BotService:
 
         self.logger.info("Executing graceful shutdown sequence...")
 
-        # 1. Cancel the runner task; the websocket closes when the SDK's
+        # 1. Gate + drain: stop accepting new messages, then settle in-flight
+        #    ones before touching the websocket. Keeps the ws open on purpose:
+        #    acks for gated/interrupted messages still reach the platform.
+        if self.pipeline:
+            self.pipeline.begin_drain()
+            await self.pipeline.drain_active_tasks(timeout=10.0)
+
+        # 2. Cancel the runner task; the websocket closes when the SDK's
         #    connection context exits on cancellation. The bounded wait is a
         #    grace period for network close, not for the SDK's internal
         #    reconnect sleep.
@@ -116,18 +135,18 @@ class BotService:
             except (asyncio.CancelledError, Exception):
                 pass
 
-        # 2. Fire-and-forget offline notification.
+        # 3. Fire-and-forget offline notification.
         if self.notifier:
             asyncio.create_task(self.notifier.send_offline_notification())
 
-        # 3. Close websocket if still open (defensive).
+        # 4. Close websocket if still open (defensive).
         if hasattr(self.client, "websocket") and self.client.websocket is not None:
             try:
                 await self.client.websocket.close()
             except Exception as e:
                 self.logger.debug("Exception while closing websocket (ignored): %s", e)
 
-        # 4. Give the event loop a moment to start the fire-and-forget
+        # 5. Give the event loop a moment to start the fire-and-forget
         #    notification task before asyncio.run() tears down the loop.
         await asyncio.sleep(0.1)
 
