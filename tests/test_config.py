@@ -1,7 +1,9 @@
 """Unit tests for configuration parsing."""
 
+import logging
+
 import pytest
-from app.main import parse_config
+from app.main import parse_config, resolve_log_level, setup_logger
 
 
 def test_default_output_dir(monkeypatch):
@@ -84,3 +86,57 @@ def test_unconfigured_notification_config(monkeypatch):
     config = parse_config([])
     assert config.notify_conversation_id is None
     assert config.notify_user_id is None
+
+
+def test_default_log_level(monkeypatch):
+    monkeypatch.delenv("LOG_LEVEL", raising=False)
+    monkeypatch.setenv("CLIENT_ID", "test_id")
+    monkeypatch.setenv("CLIENT_SECRET", "test_secret")
+
+    config = parse_config([])
+    assert config.log_level == "INFO"
+
+
+def test_log_level_read_verbatim_from_env(monkeypatch):
+    monkeypatch.setenv("CLIENT_ID", "test_id")
+    monkeypatch.setenv("CLIENT_SECRET", "test_secret")
+    monkeypatch.setenv("LOG_LEVEL", "debug")
+
+    config = parse_config([])
+    assert config.log_level == "debug"
+
+
+@pytest.mark.parametrize(
+    "raw,expected",
+    [
+        ("DEBUG", logging.DEBUG),
+        ("INFO", logging.INFO),
+        ("WARNING", logging.WARNING),
+        ("ERROR", logging.ERROR),
+        ("debug", logging.DEBUG),
+        ("  Warning ", logging.WARNING),
+        ("VERBOSE", logging.INFO),
+        ("", logging.INFO),
+        (None, logging.INFO),
+    ],
+)
+def test_resolve_log_level(raw, expected):
+    assert resolve_log_level(raw) == expected
+
+
+def test_setup_logger_applies_debug_level():
+    logger = setup_logger("debug")
+    assert logger.level == logging.DEBUG
+
+
+def test_setup_logger_invalid_level_warns_and_falls_back(caplog):
+    with caplog.at_level(logging.DEBUG, logger="file-bridge"):
+        logger = setup_logger("verbose")
+        assert logger.level == logging.INFO
+        assert "Invalid LOG_LEVEL 'verbose'" in caplog.text
+
+
+def test_setup_logger_attaches_no_private_handler():
+    setup_logger()
+    app_logger = logging.getLogger("file-bridge")
+    assert app_logger.handlers == []

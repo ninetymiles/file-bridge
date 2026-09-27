@@ -327,6 +327,12 @@ class PipelineHandler(dingtalk_stream.ChatbotHandler):
         sender = incoming_message.sender_nick or raw_data.get("senderNick") or "unknown"
         msg_type = incoming_message.message_type or raw_data.get("msgtype") or "unknown"
         self.logger.info(f"Received message from {sender}, type={msg_type}")
+        # Diagnostic logs precede any payload normalization (e.g. group @
+        # prefix stripping) so DEBUG output preserves the platform payload.
+        self.logger.debug(
+            "Callback headers: %s",
+            json.dumps(callback.headers.to_dict(), ensure_ascii=False, indent=2, default=str),
+        )
         self.logger.debug("Message raw data: %s", json.dumps(raw_data, ensure_ascii=False, indent=2, default=str))
 
         for handler in self.handlers:

@@ -1,5 +1,7 @@
 """Unit tests for PipelineHandler and BaseMessageHandler."""
 
+import logging
+
 import pytest
 from unittest.mock import MagicMock, AsyncMock
 from dingtalk_stream import CallbackMessage, AckMessage, ChatbotMessage
@@ -24,7 +26,7 @@ async def test_pipeline_execution_order():
 
     pipeline = PipelineHandler([h1, h2, h3])
 
-    callback = MagicMock(spec=CallbackMessage)
+    callback = CallbackMessage()
     callback.data = {
         "msgtype": "text",
         "text": {"content": "test"},
@@ -50,3 +52,47 @@ async def test_async_reply_text(monkeypatch):
     result = await pipeline.async_reply_text("hello", incoming_msg)
     assert result == {"errcode": 0}
     mock_reply.assert_called_once_with("hello", incoming_msg)
+
+
+@pytest.mark.asyncio
+async def test_debug_logs_headers_and_full_raw_data(caplog):
+    pipeline = PipelineHandler()
+    callback = CallbackMessage()
+    callback.headers.topic = "/v1.0/im/bot/messages/get"
+    callback.headers.message_id = "msg123"
+    callback.data = {
+        "msgtype": "text",
+        "text": {"content": "你好"},
+        "msgId": "abc",
+    }
+
+    with caplog.at_level(logging.DEBUG):
+        await pipeline.process(callback)
+
+    assert "msg123" in caplog.text
+    assert "/v1.0/im/bot/messages/get" in caplog.text
+    # Chinese must be emitted verbatim, not unicode-escaped, and payload untruncated.
+    assert "你好" in caplog.text
+    header_logs = [r for r in caplog.records if r.getMessage().startswith("Callback headers:")]
+    raw_logs = [r for r in caplog.records if r.getMessage().startswith("Message raw data:")]
+    assert len(header_logs) == 1
+    assert len(raw_logs) == 1
+
+
+@pytest.mark.asyncio
+async def test_debug_diagnostic_logs_hidden_at_info_level(caplog):
+    pipeline = PipelineHandler()
+    callback = CallbackMessage()
+    callback.headers.message_id = "msg456"
+    callback.data = {"msgtype": "text", "text": {"content": "hello"}}
+
+    with caplog.at_level(logging.INFO):
+        await pipeline.process(callback)
+
+    diagnostic_logs = [
+        r for r in caplog.records
+        if r.getMessage().startswith(("Callback headers:", "Message raw data:"))
+    ]
+    assert diagnostic_logs == []
+    # The INFO summary remains visible.
+    assert any("Received message from" in r.getMessage() for r in caplog.records)

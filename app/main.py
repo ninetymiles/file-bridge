@@ -21,18 +21,43 @@ from app.handlers import (
 dotenv.load_dotenv()
 
 DEFAULT_OUTPUT_DIR = "./output"
+DEFAULT_LOG_LEVEL = "INFO"
+
+LOG_FORMAT = '%(asctime)s %(name)-8s %(levelname)-8s %(message)s [%(filename)s:%(lineno)d]'
+
+LOG_LEVELS = {
+    "DEBUG": logging.DEBUG,
+    "INFO": logging.INFO,
+    "WARNING": logging.WARNING,
+    "ERROR": logging.ERROR,
+}
 
 
-def setup_logger():
-    logging.basicConfig(level=logging.DEBUG)
+def resolve_log_level(raw: Optional[str]) -> int:
+    """Map a case-insensitive level name to a numeric logging level.
+
+    Empty or unrecognized values fall back to logging.INFO.
+    """
+    if raw:
+        level = LOG_LEVELS.get(raw.strip().upper())
+        if level is not None:
+            return level
+    return logging.INFO
+
+
+def setup_logger(log_level: Optional[str] = DEFAULT_LOG_LEVEL) -> logging.Logger:
+    """Configure root logging and return the application logger.
+
+    The root logger stays at INFO so third-party DEBUG frames stay quiet.
+    The file-bridge logger follows LOG_LEVEL and emits through the root
+    handler via propagation: no private handler is attached, avoiding
+    duplicate output.
+    """
+    logging.basicConfig(level=logging.INFO, format=LOG_FORMAT)
     logger = logging.getLogger("file-bridge")
-    if not logger.handlers:
-        handler = logging.StreamHandler()
-        handler.setFormatter(
-            logging.Formatter('%(asctime)s %(name)-8s %(levelname)-8s %(message)s [%(filename)s:%(lineno)d]')
-        )
-        logger.addHandler(handler)
-    logger.setLevel(logging.INFO)
+    logger.setLevel(resolve_log_level(log_level))
+    if log_level is not None and log_level.strip().upper() not in LOG_LEVELS:
+        logger.warning("Invalid LOG_LEVEL %r; falling back to INFO.", log_level)
     return logger
 
 
@@ -73,6 +98,9 @@ def parse_config(args: Optional[List[str]] = None) -> argparse.Namespace:
         default=os.getenv('NOTIFY_USER_ID'),
         help='DingTalk userId (staffId) to send lifecycle online/offline notifications'
     )
+    # LOG_LEVEL is env-only (no CLI flag), read verbatim; validation and
+    # fallback to INFO happen in resolve_log_level() during logger setup.
+    parser.set_defaults(log_level=os.getenv('LOG_LEVEL') or DEFAULT_LOG_LEVEL)
 
     options = parser.parse_args(args)
 
@@ -110,11 +138,11 @@ def create_pipeline(
 
 
 def main(args=None):
-    logger = setup_logger()
     config = parse_config(args)
+    logger = setup_logger(config.log_level)
 
     credential = dingtalk_stream.Credential(config.client_id, config.client_secret)
-    client = dingtalk_stream.DingTalkStreamClient(credential)
+    client = dingtalk_stream.DingTalkStreamClient(credential, logger=logger)
 
     pipeline = create_pipeline(config.output_dir, client, logger)
     client.register_callback_handler(dingtalk_stream.chatbot.ChatbotMessage.TOPIC, pipeline)

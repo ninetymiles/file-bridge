@@ -47,7 +47,7 @@ async def test_end_to_end_file_and_rebuild_index_pipeline(tmp_path):
     pipeline.reply_text = fake_reply_text
 
     # 1. Send media file message for the first time
-    cb_msg1 = MagicMock(spec=CallbackMessage)
+    cb_msg1 = CallbackMessage()
     cb_msg1.data = {
         "msgtype": "file",
         "senderNick": "Tester",
@@ -70,7 +70,7 @@ async def test_end_to_end_file_and_rebuild_index_pipeline(tmp_path):
     assert metadata_store.is_duplicate(file_sha256) is True
 
     # 2. Send the exact same file again (deduplication check)
-    cb_msg2 = MagicMock(spec=CallbackMessage)
+    cb_msg2 = CallbackMessage()
     cb_msg2.data = {
         "msgtype": "file",
         "senderNick": "Tester",
@@ -97,7 +97,7 @@ async def test_end_to_end_file_and_rebuild_index_pipeline(tmp_path):
     os.remove(saved_path)
 
     # 4. Send '重建索引' text command
-    cb_msg3 = MagicMock(spec=CallbackMessage)
+    cb_msg3 = CallbackMessage()
     cb_msg3.data = {
         "msgtype": "text",
         "senderNick": "Admin",
@@ -111,7 +111,7 @@ async def test_end_to_end_file_and_rebuild_index_pipeline(tmp_path):
     assert "索引重建完成，清理元数据 1 条，现有有效索引 0 条。" in replies[2][0]
 
     # 5. Send calculation text message (fallback handler)
-    cb_msg4 = MagicMock(spec=CallbackMessage)
+    cb_msg4 = CallbackMessage()
     cb_msg4.data = {
         "msgtype": "text",
         "senderNick": "User",

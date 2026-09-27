@@ -1,6 +1,6 @@
 ## Purpose
 
-定义钉钉回调消息进入机器人后的统一接收入口规范，涵盖平台消息投递范围适配、群聊文本 @ 前缀归一化、richText 富文本图片段提取处理，以及面向排查的完整消息诊断日志，保障群聊 @ 机器人与单聊场景获得一致的消息处理体验。
+定义钉钉回调消息进入机器人后的统一接收入口规范，涵盖平台消息投递范围适配、群聊文本 @ 前缀归一化、richText 富文本图片段提取处理，保障群聊 @ 机器人与单聊场景获得一致的消息处理体验。回调诊断日志（DEBUG 级别回调头与完整消息体）由 `observability` 能力规范，归属独立变更 `fix-logging-configuration`。
 
 ## ADDED Requirements
 
@@ -60,14 +60,3 @@
 #### Scenario: 无图片段的 richText 不触发保存
 - **WHEN** 系统收到的 `richText` 消息中不存在任何含 `downloadCode` 的图片段
 - **THEN** 系统不触发任何下载、去重或保存行为，该消息交由处理链中的后续处理器决定是否响应
-
-### Requirement: 完整消息诊断日志
-系统 SHALL 在 DEBUG 日志级别下，为每条到达处理入口的回调输出回调头信息（至少包含 topic 与 messageId）以及完整的消息体 JSON，消息体输出 MUST NOT 截断、中文 MUST NOT 转义为 Unicode 序列。默认日志级别（INFO）下，应用的 DEBUG 诊断日志与第三方库（如 WebSocket 客户端）的 DEBUG 帧日志 SHALL 默认不输出。
-
-#### Scenario: DEBUG 级别输出完整消息
-- **WHEN** 应用以 `LOG_LEVEL=DEBUG` 运行且收到一条回调消息
-- **THEN** 日志中包含该消息的 topic、messageId 回调头以及完整未截断的消息体 JSON，群聊 `richText` 中的全部图片段均可在日志中看到
-
-#### Scenario: 默认级别压制第三方 DEBUG 噪音
-- **WHEN** 应用以默认日志级别运行
-- **THEN** 日志中不出现第三方 WebSocket 库的 DEBUG 帧收发日志，应用自身的 DEBUG 诊断日志也不输出，正常的 INFO 业务日志不受影响
