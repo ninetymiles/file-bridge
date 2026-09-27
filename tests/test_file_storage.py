@@ -3,7 +3,7 @@
 import os
 from datetime import datetime
 import pytest
-from lib.file_storage import (
+from app.utils.file_storage import (
     sanitize_sender_name,
     sanitize_extension,
     generate_saved_filename,

@@ -1,6 +1,6 @@
 ## Context
 
-See proposal.md - Why。当前消息处理链为 `DingTalkStreamClient.route_message()` → `PipelineHandler.process(callback)` → 顺序执行 `CommandHandler`、`MediaFileHandler`、`CalcBotFallbackHandler`（见 `lib/handlers.py`）。已确认的平台与代码事实：
+See proposal.md - Why。当前消息处理链为 `DingTalkStreamClient.route_message()` → `PipelineHandler.process(callback)` → 顺序执行 `CommandHandler`、`MediaFileHandler`、`CalcBotFallbackHandler`（见 `app/handlers/message.py`）。已确认的平台与代码事实：
 
 - 钉钉平台投递矩阵：单聊投递 `text`/`picture`/`video`/`file`/`richText`；群聊仅投递 @ 机器人的 `text` 与 `richText`，群聊图片在 `content.richText` 列表中以 `{type: picture, downloadCode: ...}` 段落投递；群聊 `file`/`video`/`audio` 平台不投递（官方《消息发送与接收类型》《机器人接收消息》文档）。
 - 群聊文本的 `text.content` 带 `@机器人名 ` 字面量前缀；现有处理器同时从 `message.text.content` 与 `raw_data["text"]["content"]` 两处读正文。

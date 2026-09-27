@@ -7,7 +7,7 @@
 
 ## 2. 群聊文本 @ 前缀归一化
 
-- [ ] 2.1 在 `lib/handlers.py` 实现 @ 前缀剥离纯函数（如 `strip_robot_at_prefix(content)`：去开头空白 → 去首个 `@提及段` 及紧随空白 → 其余原样保留），并补充单测：`@机器人名 重建索引` → `重建索引`、无前缀文本不变、正文中间的 `@张三` 保留、空串与 None 安全处理
+- [ ] 2.1 在 `app/handlers/message.py` 实现 @ 前缀剥离纯函数（如 `strip_robot_at_prefix(content)`：去开头空白 → 去首个 `@提及段` 及紧随空白 → 其余原样保留），并补充单测：`@机器人名 重建索引` → `重建索引`、无前缀文本不变、正文中间的 `@张三` 保留、空串与 None 安全处理
 - [ ] 2.2 在 `PipelineHandler.process()` 中接入归一化：仅当 `conversation_type=="2"` 且消息为 `text` 且 `is_in_at_list` 为真时调用，结果同时写回 `message.text.content` 与 `raw_data["text"]["content"]`；在 `tests/test_pipeline.py` 增加端到端用例：群聊 payload（带 `conversationType=2`、`isInAtList=True`、`text.content="@机器人名 1+2"`）经 process 后 CalcBotFallbackHandler 能正确算出结果并回复，且单聊消息内容不被改写
 
 ## 3. richText 图片处理

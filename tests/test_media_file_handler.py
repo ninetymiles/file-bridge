@@ -4,8 +4,8 @@ import os
 import pytest
 from unittest.mock import AsyncMock, MagicMock
 from dingtalk_stream import ChatbotMessage
-from lib.handlers import MediaFileHandler, PipelineHandler
-from lib.file_downloader import DownloadResult
+from app.handlers import MediaFileHandler, PipelineHandler
+from app.services.file_downloader import DownloadResult
 
 
 @pytest.mark.asyncio

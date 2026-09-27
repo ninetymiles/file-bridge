@@ -19,7 +19,6 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 
 # Copy application code
 COPY app/ ./app/
-COPY lib/ ./lib/
 
 EXPOSE 8000
 ENV PATH="/app/.venv/bin:$PATH"

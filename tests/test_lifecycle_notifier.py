@@ -3,7 +3,7 @@
 import asyncio
 from unittest.mock import MagicMock, patch
 import pytest
-from lib.lifecycle_notifier import LifecycleNotifier
+from app.services.lifecycle_notifier import LifecycleNotifier
 
 
 @pytest.mark.asyncio

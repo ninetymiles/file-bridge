@@ -9,7 +9,7 @@ from typing import List, Optional, Tuple
 import dingtalk_stream
 from dingtalk_stream import AckMessage, CallbackMessage, ChatbotMessage
 
-from lib.file_storage import save_file
+from app.utils.file_storage import save_file
 
 
 class BaseMessageHandler(ABC):

@@ -3,7 +3,7 @@
 import pytest
 from unittest.mock import AsyncMock, MagicMock
 from dingtalk_stream import ChatbotMessage
-from lib.handlers import CommandHandler, PipelineHandler
+from app.handlers import CommandHandler, PipelineHandler
 
 
 @pytest.mark.asyncio

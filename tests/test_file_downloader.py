@@ -4,7 +4,7 @@ import hashlib
 import os
 import pytest
 import httpx
-from lib.file_downloader import FileDownloader
+from app.services.file_downloader import FileDownloader
 
 
 @pytest.mark.asyncio

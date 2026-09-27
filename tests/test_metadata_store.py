@@ -3,7 +3,7 @@
 import os
 import sqlite3
 import pytest
-from lib.metadata_store import MetadataStore
+from app.services.metadata_store import MetadataStore
 
 
 def test_metadata_store_init(tmp_path):

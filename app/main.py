@@ -7,11 +7,11 @@ from typing import List, Optional
 import dingtalk_stream
 import dotenv
 
-from lib.metadata_store import MetadataStore
-from lib.file_downloader import FileDownloader
-from lib.lifecycle_notifier import LifecycleNotifier
-from lib.runner import BotService
-from lib.handlers import (
+from app.services.metadata_store import MetadataStore
+from app.services.file_downloader import FileDownloader
+from app.services.lifecycle_notifier import LifecycleNotifier
+from app.core.runner import BotService
+from app.handlers import (
     PipelineHandler,
     CommandHandler,
     MediaFileHandler,

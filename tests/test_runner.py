@@ -4,7 +4,7 @@ import asyncio
 import signal
 from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
-from lib.runner import BotService
+from app.core.runner import BotService
 
 
 @pytest.mark.asyncio

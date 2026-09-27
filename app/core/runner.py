@@ -13,10 +13,10 @@ import signal
 from typing import Optional, TYPE_CHECKING
 import dingtalk_stream
 
-from lib.lifecycle_notifier import LifecycleNotifier
+from app.services.lifecycle_notifier import LifecycleNotifier
 
 if TYPE_CHECKING:
-    from lib.handlers import PipelineHandler
+    from app.handlers import PipelineHandler
 
 
 class BotService:

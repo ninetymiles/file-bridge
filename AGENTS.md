@@ -7,8 +7,12 @@
 
 ## 项目结构
 
-- app/          - FastAPI 应用
-- lib/          - 核心支持模块
+- app/           - 应用主包
+  - main.py       - 入口：配置解析与依赖装配
+  - core/         - 生命周期与运行时编排（BotService）
+  - handlers/     - 钉钉消息回调处理链（PipelineHandler 及各消息处理器）
+  - services/     - 外部系统网关：文件下载、SQLite 元数据存储、生命周期通知
+  - utils/        - 无状态工具函数（文件命名清洗与落盘）
 - script/       - 离线执行脚本
 - tests/        - 单元测试
 - third-party/  - 第三方工程源码，仅作参考，不参与工程依赖和业务逻辑

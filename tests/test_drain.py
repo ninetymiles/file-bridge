@@ -6,7 +6,7 @@ import pytest
 from dingtalk_stream import AckMessage, ChatbotMessage
 from unittest.mock import AsyncMock, MagicMock
 
-from lib.handlers import BaseMessageHandler, PipelineHandler
+from app.handlers import BaseMessageHandler, PipelineHandler
 
 
 def make_callback() -> "ChatbotMessage":
@@ -131,7 +131,7 @@ async def test_download_cancel_midstream_cleans_temp_file(tmp_path):
     """Cancelling a download mid-stream must remove the partial .tmp file."""
     import httpx
 
-    from lib.file_downloader import FileDownloader
+    from app.services.file_downloader import FileDownloader
 
     async def slow_stream(_request):
         async def body():

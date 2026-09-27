@@ -3,7 +3,7 @@
 import pytest
 from unittest.mock import MagicMock, AsyncMock
 from dingtalk_stream import CallbackMessage, AckMessage, ChatbotMessage
-from lib.handlers import BaseMessageHandler, PipelineHandler
+from app.handlers import BaseMessageHandler, PipelineHandler
 
 
 class MockHandler(BaseMessageHandler):
