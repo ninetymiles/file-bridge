@@ -1,11 +1,12 @@
 # !/usr/bin/env python
 
+import argparse
 import logging
-from typing import Optional
+import os
+from typing import List, Optional
 import dingtalk_stream
 import dotenv
 
-from lib.config import parse_config, AppConfig
 from lib.metadata_store import MetadataStore
 from lib.file_downloader import FileDownloader
 from lib.lifecycle_notifier import LifecycleNotifier
@@ -18,6 +19,8 @@ from lib.handlers import (
 )
 
 dotenv.load_dotenv()
+
+DEFAULT_OUTPUT_DIR = "./output"
 
 
 def setup_logger():
@@ -33,8 +36,52 @@ def setup_logger():
     return logger
 
 
-def define_options(args=None) -> AppConfig:
-    return parse_config(args)
+def parse_config(args: Optional[List[str]] = None) -> argparse.Namespace:
+    """Parse command-line arguments and environment variables into runtime options.
+
+    Priority: command-line arguments > environment variables (incl. .env).
+    Environment fallback happens solely via add_argument defaults.
+    """
+    parser = argparse.ArgumentParser(description="DingTalk Stream Bot Configuration")
+    parser.add_argument(
+        '--client-id',
+        dest='client_id',
+        default=os.getenv('CLIENT_ID'),
+        help='app_key or suite_key from https://open-dev.dingtalk.com'
+    )
+    parser.add_argument(
+        '--client-secret',
+        dest='client_secret',
+        default=os.getenv('CLIENT_SECRET'),
+        help='app_secret or suite_secret from https://open-dev.dingtalk.com'
+    )
+    parser.add_argument(
+        '--output-dir',
+        dest='output_dir',
+        default=os.getenv('OUTPUT_DIR') or DEFAULT_OUTPUT_DIR,
+        help='Directory for media file storage and metadata database'
+    )
+    parser.add_argument(
+        '--notify-conversation-id',
+        dest='notify_conversation_id',
+        default=os.getenv('NOTIFY_CONVERSATION_ID'),
+        help='DingTalk openConversationId to send lifecycle online/offline notifications'
+    )
+    parser.add_argument(
+        '--notify-user-id',
+        dest='notify_user_id',
+        default=os.getenv('NOTIFY_USER_ID'),
+        help='DingTalk userId (staffId) to send lifecycle online/offline notifications'
+    )
+
+    options = parser.parse_args(args)
+
+    if not options.client_id or not options.client_secret:
+        parser.error(
+            'client_id and client_secret must be set via command-line arguments '
+            '(--client-id, --client-secret) or environment variables (CLIENT_ID, CLIENT_SECRET)'
+        )
+    return options
 
 
 def create_pipeline(
@@ -64,7 +111,7 @@ def create_pipeline(
 
 def main(args=None):
     logger = setup_logger()
-    config = define_options(args)
+    config = parse_config(args)
 
     credential = dingtalk_stream.Credential(config.client_id, config.client_secret)
     client = dingtalk_stream.DingTalkStreamClient(credential)

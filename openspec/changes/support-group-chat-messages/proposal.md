@@ -23,7 +23,7 @@
 
 - **代码**：
   - `app/main.py`：重构 `setup_logger()`（root INFO、应用 logger 级别可配）、向 `DingTalkStreamClient` 传入应用 logger。
-  - `lib/config.py`：`AppConfig` 新增 `log_level` 字段，解析 `LOG_LEVEL` 环境变量（默认 `INFO`）。
+  - `app/main.py`：参数解析函数 `parse_config` 返回的 Namespace 新增 `log_level` 字段，解析 `LOG_LEVEL` 环境变量（默认 `INFO`）。
   - `lib/handlers.py`：`process()` 入口新增 @ 前缀归一化与 headers+raw_data 完整日志；`MediaFileHandler` 支持 `richText` 多图逐张处理与汇总回复。
 - **测试**：新增群聊文本归一化、richText 单图/多图/多图含重复、不含图片的 richText 等用例；更新日志相关测试。
 - **文档**：`README.md` 补充 `LOG_LEVEL` 说明与"群聊文件/视频/语音平台不投递，文件请单聊发送"的使用限制（如 README 已含环境变量章节则就地补充）。

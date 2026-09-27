@@ -57,7 +57,7 @@ See proposal.md - Why。当前消息处理链为 `DingTalkStreamClient.route_mes
 3. `DingTalkStreamClient(credential, logger=logger)`：SDK 客户端日志并入应用 logger，统一格式与级别管控。
 4. `process()` 入口在现有 INFO 摘要之外，DEBUG 级新增两行：回调头（topic、messageId）与完整 `raw_data` JSON（`ensure_ascii=False, indent=2, default=str`，即现有第 250 行日志上移并补 headers），不做任何截断。
 
-`lib/config.py` 的 `AppConfig` 新增 `log_level: str = "INFO"`，仅从环境变量 `LOG_LEVEL` 读取（不增加命令行参数，保持与 OUTPUT_DIR 等运行时配置一致的环境变量方式）。
+`app/main.py` 的 `parse_config` 返回的 Namespace 新增 `log_level` 字段（缺省 `"INFO"`），仅从环境变量 `LOG_LEVEL` 读取（不增加命令行参数，保持与 OUTPUT_DIR 等运行时配置一致的环境变量方式）。注：`lib/config.py` 已由变更 simplify-config-entry 内联至 `app/main.py`，`AppConfig` 已移除。
 
 - 备选：保留私有 handler + `propagate=False`。被否：双 handler 是当前重复打印的根因，统一到 root 更简单，且 FastAPI/Uvicorn 接入后（见在途变更 integrate-fastapi-framework）日志也天然统一。
 

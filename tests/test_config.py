@@ -1,7 +1,7 @@
 """Unit tests for configuration parsing."""
 
 import pytest
-from lib.config import parse_config, DEFAULT_OUTPUT_DIR
+from app.main import parse_config
 
 
 def test_default_output_dir(monkeypatch):
@@ -12,7 +12,7 @@ def test_default_output_dir(monkeypatch):
     config = parse_config([])
     assert config.client_id == "test_id"
     assert config.client_secret == "test_secret"
-    assert config.output_dir == DEFAULT_OUTPUT_DIR
+    assert config.output_dir == "./output"
 
 
 def test_env_output_dir(monkeypatch):
@@ -31,6 +31,15 @@ def test_cli_output_dir_overrides_env(monkeypatch):
 
     config = parse_config(["--output-dir", "/custom/path"])
     assert config.output_dir == "/custom/path"
+
+
+def test_cli_credentials_override_env(monkeypatch):
+    monkeypatch.setenv("CLIENT_ID", "env_id")
+    monkeypatch.setenv("CLIENT_SECRET", "env_secret")
+
+    config = parse_config(["--client-id", "cli_id", "--client-secret", "cli_secret"])
+    assert config.client_id == "cli_id"
+    assert config.client_secret == "cli_secret"
 
 
 def test_missing_credentials_raises_error(monkeypatch):

@@ -1,6 +1,6 @@
 ## 1. 日志与配置整改
 
-- [ ] 1.1 在 `lib/config.py` 的 `AppConfig` 中新增 `log_level` 字段（缺省 `"INFO"`），从环境变量 `LOG_LEVEL` 解析；在 `tests/test_config.py` 增加用例：未设置时缺省 INFO、`LOG_LEVEL=debug` 原样读入（大小写不敏感的校验放在 1.2），运行测试验证通过
+- [ ] 1.1 在 `app/main.py` 的 `parse_config` 返回的 Namespace 中新增 `log_level` 字段（缺省 `"INFO"`），从环境变量 `LOG_LEVEL` 解析（注：`lib/config.py` 已由变更 simplify-config-entry 内联至 `app/main.py`）；在 `tests/test_config.py` 增加用例：未设置时缺省 INFO、`LOG_LEVEL=debug` 原样读入（大小写不敏感的校验放在 1.2），运行测试验证通过
 - [ ] 1.2 在 `app/main.py` 中新增级别解析纯函数（如 `resolve_log_level(raw) -> int`，支持 DEBUG/INFO/WARNING/ERROR 大小写不敏感，非法值回退 INFO）；重构 `setup_logger()`：`basicConfig(level=INFO, format=<现有详细格式>)`、移除 `file-bridge` 私有 handler 以消除重复打印、按解析结果设置应用 logger 级别、非法值时输出 WARNING；为纯函数补充单测（合法值映射、非法值回退）并运行通过
 - [ ] 1.3 在 `app/main.py` 构造 `DingTalkStreamClient` 时传入应用 logger（`logger=logger`），验证 SDK 客户端日志以 file-bridge 格式输出且不再出现独立的 `dingtalk_stream.client` handler 输出
 - [ ] 1.4 在 `PipelineHandler.process()` 入口新增 DEBUG 级回调头日志（topic、messageId），并将现有完整消息体日志与回调头放在一起（`ensure_ascii=False`、缩进、不截断）；在 `tests/test_pipeline.py` 中用 caplog 验证 DEBUG 级别下两条日志均出现且包含 messageId 与完整 raw_data，INFO 级别下不出现
