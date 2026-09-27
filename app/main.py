@@ -93,10 +93,11 @@ def parse_config(args: Optional[List[str]] = None) -> argparse.Namespace:
         help='DingTalk openConversationId to send lifecycle online/offline notifications'
     )
     parser.add_argument(
-        '--notify-user-id',
-        dest='notify_user_id',
-        default=os.getenv('NOTIFY_USER_ID'),
-        help='DingTalk userId (staffId) to send lifecycle online/offline notifications'
+        '--notify-staff-id',
+        dest='notify_staff_id',
+        default=os.getenv('NOTIFY_STAFF_ID'),
+        help='DingTalk senderStaffId (enterprise userId from the raw message '
+             'payload) to send lifecycle online/offline notifications'
     )
     # LOG_LEVEL is env-only (no CLI flag), read verbatim; validation and
     # fallback to INFO happen in resolve_log_level() during logger setup.
@@ -154,7 +155,7 @@ def main(args=None):
     notifier = LifecycleNotifier(
         dingtalk_client=client,
         notify_conversation_id=config.notify_conversation_id,
-        notify_user_id=config.notify_user_id,
+        notify_staff_id=config.notify_staff_id,
         logger=logger,
     )
     runner = BotService(client=client, notifier=notifier, logger=logger, pipeline=pipeline)
