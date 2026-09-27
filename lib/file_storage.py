@@ -51,8 +51,8 @@ def generate_saved_filename(
     clean_ext = sanitize_extension(original_filename, default_ext=default_ext)
 
     ts = timestamp or datetime.now()
-    # Format timestamp with milliseconds: YYYYMMDDHHmmss_fff
-    time_str = ts.strftime("%Y%m%d_%H%M%S_%f")[:18]
+    # Format timestamp with milliseconds: YYYYMMDD_HHMMSS_fff
+    time_str = ts.strftime("%Y%m%d_%H%M%S_%f")[:19]
 
     return f"[{clean_sender}]_{time_str}{clean_ext}"
 

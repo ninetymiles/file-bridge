@@ -23,8 +23,8 @@ class BotService:
 
     - :meth:`start`: construct the runtime, send online notification, launch
       the SDK background task and register ``SIGINT``/``SIGTERM`` handlers.
-    - :meth:`stop`: run the graceful shutdown sequence (``client.stop()`` ->
-      ``runner_task.cancel()`` -> fire-and-forget offline notify -> close ws).
+    - :meth:`stop`: run the graceful shutdown sequence (``runner_task.cancel()``
+      with a bounded wait -> fire-and-forget offline notify -> close ws).
 
     Callers may also use :meth:`start_and_wait` for the convenience of waiting
     until a stop signal arrives, or :meth:`run_forever` for a synchronous
@@ -77,19 +77,16 @@ class BotService:
     async def stop(self) -> None:
         """Idempotent stop: run the graceful shutdown sequence.
 
-        Order is significant (see
-        ``openspec/changes/fix-graceful-shutdown-stuck-on-reconnect/design.md``):
+        Order is significant:
 
-        1. ``await client.stop()`` - set the SDK ``_stop_event`` and close the
-           active websocket so the reconnect loop exits cleanly (not treated
-           as a network exception triggering reconnect).
-        2. ``runner_task.cancel()`` - cancel the SDK task in case it is
-           blocked in a synchronous call; await with a 5s timeout.
-        3. Fire-and-forget offline notification - failure must not block
+        1. ``runner_task.cancel()`` - cancel the SDK task; the websocket
+           closes when the SDK's connection context exits on cancellation.
+           Await with a 1s bounded timeout: a grace period for network close,
+           not for the SDK's internal reconnect sleep.
+        2. Fire-and-forget offline notification - failure must not block
            shutdown.
-        4. Close websocket if still open (defensive; ``client.stop()`` should
-           have closed it already).
-        5. Brief ``await asyncio.sleep(0.1)`` to give the event loop a chance
+        3. Close websocket if still open (defensive).
+        4. Brief ``await asyncio.sleep(0.1)`` to give the event loop a chance
            to schedule the fire-and-forget notification task before the loop
            tears down.
 
@@ -103,36 +100,34 @@ class BotService:
 
         self.logger.info("Executing graceful shutdown sequence...")
 
-        # 1. Stop the SDK client first.
-        try:
-            await asyncio.wait_for(self.client.stop(), timeout=5.0)
-        except asyncio.TimeoutError:
-            self.logger.warning("Timeout stopping SDK client; proceeding with cancellation.")
-        except Exception as e:
-            self.logger.warning("Exception while stopping SDK client (ignored): %s", e)
-
-        # 2. Cancel the runner task if still running.
+        # 1. Cancel the runner task; the websocket closes when the SDK's
+        #    connection context exits on cancellation. The bounded wait is a
+        #    grace period for network close, not for the SDK's internal
+        #    reconnect sleep.
         if self._runner_task and not self._runner_task.done():
             self._runner_task.cancel()
             try:
-                await asyncio.wait_for(self._runner_task, timeout=5.0)
+                await asyncio.wait_for(self._runner_task, timeout=1.0)
             except asyncio.TimeoutError:
-                self.logger.warning("Timeout waiting for runner task to cancel.")
+                self.logger.info(
+                    "Runner task did not finish within 1s; it is abandoned "
+                    "and dies with the process exit (no reconnect happens)."
+                )
             except (asyncio.CancelledError, Exception):
                 pass
 
-        # 3. Fire-and-forget offline notification.
+        # 2. Fire-and-forget offline notification.
         if self.notifier:
             asyncio.create_task(self.notifier.send_offline_notification())
 
-        # 4. Close websocket if still open (defensive).
+        # 3. Close websocket if still open (defensive).
         if hasattr(self.client, "websocket") and self.client.websocket is not None:
             try:
                 await self.client.websocket.close()
             except Exception as e:
                 self.logger.debug("Exception while closing websocket (ignored): %s", e)
 
-        # 5. Give the event loop a moment to start the fire-and-forget
+        # 4. Give the event loop a moment to start the fire-and-forget
         #    notification task before asyncio.run() tears down the loop.
         await asyncio.sleep(0.1)
 
@@ -155,10 +150,8 @@ class BotService:
     def request_stop(self, signame: Optional[str] = None):
         """Signal the service to initiate graceful shutdown.
 
-        On the first signal: synchronously set the SDK client's internal
-        ``_stop_event`` so the SDK reconnect loop exits immediately (not
-        waiting for the main loop's next await point), then set the
-        service's own stop event to break out of the wait.
+        On the first signal: set the service's own stop event to break out
+        of the wait in :meth:`start_and_wait`.
 
         On a subsequent signal (already shutting down): raise
         ``KeyboardInterrupt`` to give the user a force-exit escape hatch.
@@ -170,13 +163,6 @@ class BotService:
         self._is_shutting_down = True
         sig_desc = f" ({signame})" if signame else ""
         self.logger.info("Received stop request%s, initiating graceful shutdown...", sig_desc)
-        # Set the SDK's internal stop event immediately so its reconnect loop
-        # (while not self._stop_event.is_set()) exits without waiting for the
-        # main loop's await point. NOTE: `_stop_event` is a private SDK
-        # attribute; review this access on SDK upgrade.
-        sdk_stop_event = getattr(self.client, "_stop_event", None)
-        if sdk_stop_event is not None and not sdk_stop_event.is_set():
-            sdk_stop_event.set()
         if self._stop_event and not self._stop_event.is_set():
             self._stop_event.set()
 

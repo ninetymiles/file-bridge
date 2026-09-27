@@ -41,9 +41,10 @@ async def test_service_lifecycle_and_graceful_shutdown():
     # Wait for start_and_wait to complete
     await asyncio.wait_for(run_task, timeout=2.0)
 
-    # Spec: shutdown sequence calls client.stop() before runner_task.cancel()
-    client.stop.assert_awaited_once()
+    # Spec: shutdown cancels the runner task; the SDK client is never
+    # stopped directly (SDK 0.24.3 has no stop() API).
     assert service._runner_task.done()
+    client.stop.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -96,28 +97,20 @@ def test_run_forever_handles_exit():
 
 
 @pytest.mark.asyncio
-async def test_shutdown_calls_client_stop_before_runner_task_cancel():
-    """Spec: shutdown sequence is client.stop() -> runner_task.cancel().
-
-    Setting SDK _stop_event first ensures the reconnect loop exits cleanly
-    and is not treated as a network exception triggering reconnect.
-    """
-    call_order = []
-
+async def test_shutdown_cancels_runner_task_without_client_stop():
+    """Spec: shutdown cancels the runner task within a bounded wait; the
+    SDK client is never stopped directly (SDK 0.24.3 has no stop() API
+    and no _stop_event attribute)."""
     client = MagicMock()
-
-    async def mock_stop():
-        call_order.append("client.stop")
 
     async def mock_start():
         try:
             await asyncio.Event().wait()
         except asyncio.CancelledError:
-            call_order.append("task.cancelled")
             raise
 
     client.start = mock_start
-    client.stop = mock_stop
+    client.stop = AsyncMock()
     client.websocket = None
 
     notifier = MagicMock()
@@ -132,9 +125,8 @@ async def test_shutdown_calls_client_stop_before_runner_task_cancel():
     service.request_stop("SIGINT")
     await asyncio.wait_for(run_task, timeout=2.0)
 
-    assert "client.stop" in call_order
-    assert "task.cancelled" in call_order
-    assert call_order.index("client.stop") < call_order.index("task.cancelled")
+    assert service._runner_task.cancelled()
+    client.stop.assert_not_awaited()
 
 
 def test_request_stop_raises_on_second_signal():
@@ -237,7 +229,7 @@ async def test_stop_is_idempotent():
     service.request_stop("SIGINT")
     await service.stop()
 
-    client.stop.assert_awaited_once()
-    # Second call must not call client.stop() again
+    client.stop.assert_not_awaited()
+    # Second call must be a no-op (no direct SDK stop, ever)
     await service.stop()
-    client.stop.assert_awaited_once()
+    client.stop.assert_not_awaited()

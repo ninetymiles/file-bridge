@@ -38,7 +38,7 @@ def test_generate_saved_filename():
         original_filename="document.pdf",
         timestamp=fixed_time,
     )
-    assert filename == "[Alice]_20260924153045_123.pdf"
+    assert filename == "[Alice]_20260924_153045_123.pdf"
 
 
 def test_save_file_directory_structure_and_collision(tmp_path):
@@ -59,7 +59,7 @@ def test_save_file_directory_structure_and_collision(tmp_path):
 
     expected_date_dir = output_dir / "2026-09-24"
     assert os.path.exists(expected_date_dir)
-    assert saved_path1 == str(expected_date_dir / "[Bob]_20260924153045_123.txt")
+    assert saved_path1 == str(expected_date_dir / "[Bob]_20260924_153045_123.txt")
     assert os.path.exists(saved_path1)
 
     # Collision check: save another file with same timestamp and sender
