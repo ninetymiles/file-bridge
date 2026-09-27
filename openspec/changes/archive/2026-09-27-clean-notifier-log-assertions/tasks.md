@@ -7,4 +7,4 @@
 ## 2. 校验与归档顺序
 
 - [x] 2.1 运行 `openspec validate clean-notifier-log-assertions --strict` 确认工件合法
-- [ ] 2.2 归档顺序检查：确认 `dual-notify-targets-and-staff-id` 先于本变更 archive（两个变更 MODIFIED 同一需求，倒序归档会造成需求内容覆盖错误）
+- [x] 2.2 归档顺序检查：确认 `dual-notify-targets-and-staff-id` 先于本变更 archive（两个变更 MODIFIED 同一需求，倒序归档会造成需求内容覆盖错误）
