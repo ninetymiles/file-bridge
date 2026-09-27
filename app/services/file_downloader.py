@@ -2,6 +2,7 @@
 
 import asyncio
 import hashlib
+import logging
 import os
 import uuid
 from dataclasses import dataclass
@@ -19,6 +20,15 @@ class DownloadResult:
     file_size: int
 
 
+def mask_access_token(token: Optional[str]) -> str:
+    """Return a non-replayable fingerprint of an access token for logs."""
+    if not token:
+        return "unavailable"
+    if len(token) < 8:
+        return "***"
+    return f"{token[:6]}...{token[-2:]}"
+
+
 class FileDownloader:
     """Downloads files using DingTalk OpenAPI and streaming HTTP."""
 
@@ -28,12 +38,14 @@ class FileDownloader:
         dingtalk_client=None,
         openapi_endpoint: str = DINGTALK_OPENAPI_ENDPOINT,
         http_client: Optional[httpx.AsyncClient] = None,
+        logger: Optional[logging.Logger] = None,
     ):
         self.output_dir = output_dir
         self.temp_dir = os.path.join(output_dir, ".tmp")
         self.dingtalk_client = dingtalk_client
         self.openapi_endpoint = openapi_endpoint
         self._http_client = http_client
+        self.logger = logger or logging.getLogger("file-bridge.downloader")
 
     async def get_access_token(self) -> Optional[str]:
         """Obtain DingTalk access token from client."""
@@ -71,15 +83,31 @@ class FileDownloader:
             "downloadCode": download_code,
         }
 
+        self.logger.debug(
+            "Resolving temporary download URL: robotCode=%s, downloadCode=%s, access_token=%s",
+            robot_code,
+            download_code,
+            mask_access_token(access_token),
+        )
+
         owns_client = self._http_client is None
         client = self._http_client or httpx.AsyncClient()
         try:
             response = await client.post(url, headers=headers, json=payload)
-            response.raise_for_status()
+            try:
+                response.raise_for_status()
+            except httpx.HTTPStatusError:
+                self.logger.error(
+                    "messageFiles/download failed: status=%s, body=%s",
+                    response.status_code,
+                    response.text,
+                )
+                raise
             data = response.json()
             download_url = data.get("downloadUrl")
             if not download_url:
                 raise ValueError(f"Download URL missing in response: {data}")
+            self.logger.debug("Resolved temporary download URL: %s", download_url)
             return download_url
         finally:
             if owns_client:
@@ -109,6 +137,11 @@ class FileDownloader:
                             f.write(chunk)
                             file_size += len(chunk)
 
+            self.logger.debug(
+                "Streamed download complete: %d bytes, temp_path=%s",
+                file_size,
+                temp_file_path,
+            )
             return DownloadResult(
                 temp_path=temp_file_path,
                 sha256=hasher.hexdigest(),

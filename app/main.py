@@ -119,7 +119,11 @@ def create_pipeline(
 ) -> PipelineHandler:
     """Construct and configure the message pipeline with handlers."""
     metadata_store = MetadataStore(output_dir=output_dir)
-    file_downloader = FileDownloader(output_dir=output_dir, dingtalk_client=dingtalk_client)
+    file_downloader = FileDownloader(
+        output_dir=output_dir,
+        dingtalk_client=dingtalk_client,
+        logger=logger,
+    )
 
     pipeline = PipelineHandler(
         handlers=[

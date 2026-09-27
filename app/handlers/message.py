@@ -319,16 +319,103 @@ class PipelineHandler(dingtalk_stream.ChatbotHandler):
         finally:
             self._active_tasks.pop(task, None)
 
+    def _log_received_message(self, message: ChatbotMessage, raw_data: dict) -> None:
+        """Emit the INFO metadata summary and DEBUG typed content logs.
+
+        INFO must stay free of message bodies, download codes and URLs;
+        DEBUG carries the full typed content. All logs run before any
+        payload normalization (e.g. group @ prefix stripping).
+        """
+        sender = message.sender_nick or raw_data.get("senderNick") or "unknown"
+        msg_type = message.message_type or raw_data.get("msgtype") or "unknown"
+        content = raw_data.get("content") or {}
+
+        conversation_type = message.conversation_type or raw_data.get("conversationType")
+        if conversation_type == "2":
+            group_title = message.conversation_title or raw_data.get("conversationTitle") or "unknown group"
+            summary = f"Received group message from {sender} in {group_title}, type={msg_type}"
+        elif conversation_type == "1":
+            summary = f"Received private message from {sender}, type={msg_type}"
+        else:
+            summary = f"Received message from {sender}, type={msg_type}"
+
+        if msg_type == "richText":
+            segments = []
+            if message.rich_text_content and message.rich_text_content.rich_text_list:
+                segments = message.rich_text_content.rich_text_list
+            elif isinstance(content.get("richText"), list):
+                segments = content["richText"]
+            text_count = sum(1 for item in segments if isinstance(item, dict) and "text" in item)
+            picture_count = sum(1 for item in segments if isinstance(item, dict) and "downloadCode" in item)
+            summary += f", segments={len(segments)} ({text_count} text, {picture_count} picture)"
+        elif msg_type in ("file", "video"):
+            filename = content.get("fileName")
+            if filename:
+                summary += f", filename={filename}"
+
+        self.logger.info(summary)
+
+        if msg_type == "text":
+            text_content = ""
+            if message.text and message.text.content:
+                text_content = message.text.content
+            elif isinstance(raw_data.get("text"), dict):
+                text_content = raw_data["text"].get("content", "")
+            self.logger.debug("Text content: %s", text_content)
+        elif msg_type == "richText":
+            segments = []
+            if message.rich_text_content and message.rich_text_content.rich_text_list:
+                segments = message.rich_text_content.rich_text_list
+            elif isinstance(content.get("richText"), list):
+                segments = content["richText"]
+            total = len(segments)
+            for index, item in enumerate(segments, start=1):
+                if not isinstance(item, dict):
+                    self.logger.debug("RichText segment[%d/%d] non-dict segment: %r", index, total, item)
+                elif "text" in item:
+                    self.logger.debug("RichText segment[%d/%d] text: %s", index, total, item["text"])
+                elif "downloadCode" in item:
+                    self.logger.debug(
+                        "RichText segment[%d/%d] picture: type=%s, downloadCode=%s",
+                        index,
+                        total,
+                        item.get("type", "picture"),
+                        item["downloadCode"],
+                    )
+                else:
+                    self.logger.debug(
+                        "RichText segment[%d/%d] other keys: %s",
+                        index,
+                        total,
+                        sorted(item.keys()),
+                    )
+        elif msg_type == "picture":
+            download_code = None
+            if message.image_content and message.image_content.download_code:
+                download_code = message.image_content.download_code
+            else:
+                download_code = content.get("downloadCode")
+            self.logger.debug("Picture attachment: downloadCode=%s", download_code)
+        elif msg_type in ("file", "video"):
+            download_code = content.get("downloadCode") or raw_data.get("downloadCode")
+            label = "File" if msg_type == "file" else "Video"
+            filename = content.get("fileName")
+            self.logger.debug(
+                "%s attachment: fileName=%s, downloadCode=%s",
+                label,
+                filename,
+                download_code,
+            )
+
     async def _dispatch(self, callback: CallbackMessage) -> Tuple[int, str]:
         """Run the handler chain for one message."""
         raw_data = callback.data or {}
         incoming_message = ChatbotMessage.from_dict(raw_data)
 
-        sender = incoming_message.sender_nick or raw_data.get("senderNick") or "unknown"
-        msg_type = incoming_message.message_type or raw_data.get("msgtype") or "unknown"
-        self.logger.info(f"Received message from {sender}, type={msg_type}")
-        # Diagnostic logs precede any payload normalization (e.g. group @
-        # prefix stripping) so DEBUG output preserves the platform payload.
+        # INFO metadata summary first, then DEBUG typed content; both
+        # precede any payload normalization (e.g. group @ prefix stripping)
+        # so DEBUG output preserves the platform payload.
+        self._log_received_message(incoming_message, raw_data)
         self.logger.debug(
             "Callback headers: %s",
             json.dumps(callback.headers.to_dict(), ensure_ascii=False, indent=2, default=str),

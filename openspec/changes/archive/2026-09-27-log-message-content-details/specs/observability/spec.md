@@ -1,10 +1,4 @@
-# observability Specification
-
-## Purpose
-
-定义应用运行期的诊断可观测性要求，使排障时能够在 DEBUG 日志级别下查看每条钉钉回调的回调头与完整消息体，同时保证默认运行级别安静、不被第三方库 DEBUG 日志干扰。
-
-## Requirements
+## MODIFIED Requirements
 
 ### Requirement: 回调消息诊断日志
 系统 SHALL 在 DEBUG 日志级别下，为每条到达消息处理入口的回调（单聊与群聊一致）输出回调头信息（至少包含 topic 与 messageId）、完整的消息体 JSON，以及按消息类型解析的类型化正文日志；消息体输出 MUST NOT 截断，中文 MUST NOT 转义为 Unicode 序列。类型化正文日志 SHALL 覆盖：`text` 输出正文全文；`richText` 按段落顺序逐段输出，文本段输出正文原文（位于任何 @ 前缀归一化之前），图片段输出段类型与完整 `downloadCode`；`picture`、`file`、`video` 输出完整 `downloadCode`，并在回调提供时输出 `fileName`。默认 INFO 级别的消息接收摘要 SHALL 只包含会话与消息元数据（单聊/群聊类型、群标题、发送者、消息类型；richText 的段落数量与文本段/图片段构成；file/video 的文件名），MUST NOT 包含文本正文、downloadCode 或任何下载链接。默认日志级别（INFO）下，应用的 DEBUG 诊断日志与第三方库（如 WebSocket 客户端）的 DEBUG 帧日志 SHALL 默认不输出，且同一条业务日志 MUST NOT 被重复输出多次。
@@ -28,6 +22,8 @@
 #### Scenario: DEBUG 输出各类型正文细节
 - **WHEN** 应用以 DEBUG 级别运行并分别收到 text、picture、file、video 消息
 - **THEN** 日志分别包含：text 的正文全文；picture 的完整 downloadCode；file/video 的完整 downloadCode 与回调提供的 fileName（picture 回调无文件名字段时不输出编造的文件名）
+
+## ADDED Requirements
 
 ### Requirement: 媒体下载链路诊断日志
 媒体下载组件 SHALL 在 DEBUG 日志级别下输出文件下载链路的完整排障细节：调用换链接口前输出 robotCode 与完整 downloadCode，换链成功后输出返回的完整临时下载 URL（不脱敏、不截断）；access_token MUST 仅以脱敏指纹形式出现，MUST NOT 输出完整 token。换链接口返回非成功状态时，系统 SHALL 以 ERROR 级别记录 HTTP 状态与响应体后再抛出异常。流式下载完成后 SHALL 在 DEBUG 级别输出下载字节数与本地临时文件路径。默认 INFO 级别下，应用自身日志 MUST NOT 输出 downloadCode、临时下载 URL、access_token 或响应体内容；第三方 HTTP 库（如 httpx）自带的请求行日志不在本需求约束范围内，应用不为压制依赖库日志增加额外配置。
