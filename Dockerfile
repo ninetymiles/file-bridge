@@ -14,8 +14,7 @@ WORKDIR /app
 COPY uv.lock pyproject.toml ./
 
 # Install dependencies using uv sync (creates .venv, excludes dev dependencies)
-RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --no-dev
+RUN uv sync --no-dev --no-cache
 
 # Copy application code
 COPY app/ ./app/
