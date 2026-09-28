@@ -126,11 +126,11 @@ class LifecycleNotifier:
     async def send_online_notification(self) -> bool:
         """Send service online notification."""
         title = "🤖 File Bridge 机器人已上线"
-        content = "### 🤖 File Bridge 机器人已上线\n服务已就绪，正在监听消息。"
+        content = "服务已就绪，可以随时在群聊中@机器人 发送视频和照片，或直接私聊机器人发送视频照片。"
         return await self.send_notification(title, content)
 
     async def send_offline_notification(self) -> bool:
         """Send service offline notification."""
         title = "🛑 File Bridge 机器人已离线"
-        content = "### 🛑 File Bridge 机器人已离线\n服务已接收停机信号并完成清理。"
+        content = "服务已停止。"
         return await self.send_notification(title, content)
