@@ -2,7 +2,7 @@
 
 - 语言环境: Python + venv
 - 包管理器: uv
-- 开发框架: DingTalkStreamSDK / FastAPI
+- 开发框架: DingTalkStreamSDK
 - 测试框架: pytest
 
 ## 项目结构
@@ -33,5 +33,5 @@
 
 ## 常用命令
 
-- uv run uvicorn main:app   # 启动开发服务器，端口8000
+- uv run python -m app.main # 启动应用
 - uv run pytest             # 运行单元测试
