@@ -112,4 +112,27 @@ async def test_end_to_end_file_and_rebuild_index_pipeline(tmp_path):
     assert len(replies) == 3
     assert "索引重建完成，清理元数据 1 条，现有有效索引 0 条。" in replies[2][0]
 
+    # 5. Send richText with both image and command — both must fire
+    cb_msg4 = CallbackMessage()
+    cb_msg4.data = {
+        "msgtype": "richText",
+        "senderNick": "Tester",
+        "senderId": "user_100",
+        "sessionWebhook": "https://webhook.mock",
+        "content": {
+            "richText": [
+                {"text": "@FileBridge"},
+                {"text": "重建索引 "},
+                {"type": "picture", "downloadCode": "code_rich_1"},
+            ]
+        },
+    }
+
+    status, msg = await pipeline.process(cb_msg4)
+    assert status == AckMessage.STATUS_OK
+    # Two replies: CommandHandler (index rebuild) first, then MediaFileHandler (image saved)
+    assert len(replies) == 5
+    assert "索引重建完成" in replies[3][0]
+    assert "文件接收成功，已保存为:" in replies[4][0]
+
     await http_client.aclose()

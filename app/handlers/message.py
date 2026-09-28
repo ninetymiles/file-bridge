@@ -4,12 +4,22 @@ import asyncio
 import json
 import logging
 import os
+import re
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 from typing import List, Optional, Tuple
 import dingtalk_stream
 from dingtalk_stream import AckMessage, CallbackMessage, ChatbotMessage
 
 from app.utils.file_storage import save_file
+
+
+@dataclass
+class _ImageProcessResult:
+    """Result of processing a single image (download + dedupe + save)."""
+
+    status: str  # "saved" | "duplicate" | "failed" | "cancelled"
+    detail: str  # saved filename for "saved", reply message for others
 
 
 class BaseMessageHandler(ABC):
@@ -50,14 +60,20 @@ class CommandHandler(BaseMessageHandler):
         pipeline: "PipelineHandler",
     ) -> bool:
         """Match and execute command messages like '重建索引'."""
-        if message.message_type != "text" and raw_data.get("msgtype") != "text":
-            return False
+        msgtype = message.message_type or raw_data.get("msgtype")
 
-        content = ""
-        if message.text and message.text.content:
-            content = message.text.content
-        elif "text" in raw_data and isinstance(raw_data["text"], dict):
-            content = raw_data["text"].get("content", "")
+        if msgtype == "text":
+            content = ""
+            if message.text and message.text.content:
+                content = message.text.content
+            elif "text" in raw_data and isinstance(raw_data["text"], dict):
+                content = raw_data["text"].get("content", "")
+        elif msgtype == "richText":
+            segments = (raw_data.get("content") or {}).get("richText") or []
+            content = self._merge_rich_text(segments)
+            self.logger.debug("RichText merged text: %s", content)
+        else:
+            return False
 
         content = content.strip()
 
@@ -67,15 +83,38 @@ class CommandHandler(BaseMessageHandler):
             cleaned_count, remaining_count = await self.metadata_store.async_rebuild_index()
             response_text = f"索引重建完成，清理元数据 {cleaned_count} 条，现有有效索引 {remaining_count} 条。"
             await pipeline.async_reply_text(response_text, message)
-            return True
+            return False
 
         return False
+
+    @staticmethod
+    def _merge_rich_text(segments) -> str:
+        """Merge richText segments into a single semantic text string.
+
+        Text segments are concatenated as-is, except standalone @ mention
+        segments (matching ^@\\S+$) are removed. Picture segments are
+        replaced with <imgN> placeholders (N starts at 1).
+        """
+        result_parts = []
+        img_counter = 0
+        for seg in segments:
+            if not isinstance(seg, dict):
+                continue
+            if "text" in seg:
+                text = seg["text"]
+                if isinstance(text, str) and re.match(r"^@\S+$", text):
+                    continue
+                result_parts.append(str(text))
+            elif "downloadCode" in seg:
+                img_counter += 1
+                result_parts.append(f"<img{img_counter}>")
+        return "".join(result_parts)
 
 
 class MediaFileHandler(BaseMessageHandler):
     """Handler for media and file messages (picture, video, file)."""
 
-    SUPPORTED_MSG_TYPES = {"picture", "video", "file"}
+    SUPPORTED_MSG_TYPES = {"picture", "video", "file", "richText"}
 
     def __init__(
         self,
@@ -104,12 +143,16 @@ class MediaFileHandler(BaseMessageHandler):
         raw_data: dict,
         pipeline: "PipelineHandler",
     ) -> bool:
-        """Handle picture, video, and file messages."""
+        """Handle picture, video, file, and richText messages."""
         msgtype = message.message_type or raw_data.get("msgtype")
         if msgtype not in self.SUPPORTED_MSG_TYPES:
             return False
 
         content = raw_data.get("content") or {}
+
+        if msgtype == "richText":
+            return await self._handle_rich_text(message, raw_data, pipeline, content)
+
         download_code = None
         original_filename = None
         default_ext = ""
@@ -119,7 +162,7 @@ class MediaFileHandler(BaseMessageHandler):
                 download_code = message.image_content.download_code
             else:
                 download_code = content.get("downloadCode")
-            original_filename = content.get("fileName") or "picture.png"
+            original_filename = "picture.png"
             default_ext = ".png"
         elif msgtype == "video":
             download_code = content.get("downloadCode") or raw_data.get("downloadCode")
@@ -134,32 +177,48 @@ class MediaFileHandler(BaseMessageHandler):
             self.logger.warning(f"No downloadCode found in {msgtype} message")
             return False
 
-        # Shutdown checkpoint: abandon before starting any download work.
-        if pipeline.is_draining():
-            self.logger.info(f"Shutdown in progress; abandoning {msgtype} message before download.")
-            return True
-
-        # --- Interruptible phase: download ---
-        # Run as a registered sub-task so begin_drain() can cancel only the
-        # download and leave the archive phase (dedupe/save/commit/reply)
-        # untouched. download_file_stream's BaseException handler cleans the
-        # temp file on cancellation.
-        download_task = asyncio.create_task(
-            self._download_phase(download_code)
+        result = await self._process_one_image(
+            download_code, original_filename, default_ext, message, raw_data
         )
+
+        if result.status == "saved":
+            await pipeline.async_reply_text(f"文件接收成功，已保存为: {result.detail}", message)
+        elif result.status == "cancelled":
+            await pipeline.async_reply_text(result.detail, message)
+        else:
+            await pipeline.async_reply_text(result.detail, message)
+        return False
+
+    async def _process_one_image(
+        self,
+        download_code: str,
+        original_filename: str,
+        default_ext: str,
+        message: ChatbotMessage,
+        raw_data: dict,
+    ) -> _ImageProcessResult:
+        """Download, dedupe, and save a single media file.
+
+        Returns a structured result; the caller decides how to reply.
+        The download phase is interruptible via cancel_tasks(); the archive
+        phase (dedupe/save/commit) is not.
+        """
+        # --- Interruptible phase: download ---
+        download_task = asyncio.create_task(self._download_phase(download_code))
         self._interruptible_tasks.add(download_task)
         try:
             download_result = await download_task
         except asyncio.CancelledError:
-            self.logger.info(f"Download of {msgtype} interrupted by shutdown.")
-            await pipeline.async_reply_text("服务正在关闭，下载任务已取消", message)
-            return True
+            self.logger.info(f"Download of {original_filename} interrupted by shutdown.")
+            return _ImageProcessResult("cancelled", "服务正在关闭，下载任务已取消")
+        except Exception as e:
+            self.logger.error(f"Download failed for {original_filename}: {e}", exc_info=True)
+            return _ImageProcessResult("failed", "文件接收处理失败，请稍后重试")
         finally:
             self._interruptible_tasks.discard(download_task)
 
-        # --- Non-interruptible phase: archive (dedupe, save, commit, reply) ---
+        # --- Non-interruptible phase: archive (dedupe, save, commit) ---
         try:
-            # Check for duplicate
             is_dup = await self.metadata_store.async_is_duplicate(download_result.sha256)
             if is_dup:
                 self.logger.info(f"Duplicate file detected (sha256={download_result.sha256}), skipping save")
@@ -168,10 +227,8 @@ class MediaFileHandler(BaseMessageHandler):
                         os.remove(download_result.temp_path)
                     except OSError:
                         pass
-                await pipeline.async_reply_text("文件已存在，请勿重复发送", message)
-                return True
+                return _ImageProcessResult("duplicate", "文件已存在，请勿重复发送")
 
-            # Save file to destination directory
             sender_nick = message.sender_nick or raw_data.get("senderNick")
             sender_id = message.sender_id or raw_data.get("senderId") or message.sender_staff_id or "unknown"
             sender = sender_nick or sender_id
@@ -193,23 +250,58 @@ class MediaFileHandler(BaseMessageHandler):
                 file_size=download_result.file_size,
             )
 
+            saved_filename = os.path.basename(saved_path)
             self.logger.info(
                 f"File saved: {saved_path} (sha256={download_result.sha256}, size={download_result.file_size})"
             )
-
-            saved_filename = os.path.basename(saved_path)
-            await pipeline.async_reply_text(f"文件接收成功，已保存为: {saved_filename}", message)
-            return True
+            return _ImageProcessResult("saved", saved_filename)
 
         except Exception as e:
-            self.logger.error(f"Failed to process media message ({msgtype}): {e}", exc_info=True)
+            self.logger.error(f"Failed to process media file ({original_filename}): {e}", exc_info=True)
             if os.path.exists(download_result.temp_path):
                 try:
                     os.remove(download_result.temp_path)
                 except OSError:
                     pass
-            await pipeline.async_reply_text("文件接收处理失败，请稍后重试", message)
-            return True
+            return _ImageProcessResult("failed", "文件接收处理失败，请稍后重试")
+
+    async def _handle_rich_text(
+        self,
+        message: ChatbotMessage,
+        raw_data: dict,
+        pipeline: "PipelineHandler",
+        content: dict,
+    ) -> bool:
+        """Handle richText messages: extract picture segments, save each, reply consolidated."""
+        segments = content.get("richText") or []
+        picture_segments = [seg for seg in segments if isinstance(seg, dict) and "downloadCode" in seg]
+
+        if not picture_segments:
+            return False
+
+        results: List[_ImageProcessResult] = []
+        for index, seg in enumerate(picture_segments, start=1):
+            download_code = seg["downloadCode"]
+            result = await self._process_one_image(
+                download_code,
+                original_filename=f"picture_{index}.png",
+                default_ext=".png",
+                message=message,
+                raw_data=raw_data,
+            )
+            results.append(result)
+            if result.status == "cancelled":
+                break
+
+        reply_lines = []
+        for result in results:
+            if result.status == "saved":
+                reply_lines.append(f"文件接收成功，已保存为: {result.detail}")
+            else:
+                reply_lines.append(result.detail)
+
+        await pipeline.async_reply_text("\n".join(reply_lines), message)
+        return False
 
     async def _download_phase(self, download_code: str):
         """Resolve download URL and stream the file to a temp path.
