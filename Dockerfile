@@ -1,22 +1,13 @@
 # syntax=docker/dockerfile:1
-
-# Use official Python image as base
 FROM python:3.14-slim
-
 ARG UV_INDEX
 
-# Copy uv binary from official uv image
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
-
 WORKDIR /app
 
-# Copy dependency files for layer caching
 COPY uv.lock pyproject.toml ./
-
-# Install dependencies using uv sync (creates .venv, excludes dev dependencies)
 RUN uv sync --no-dev --no-cache
 
-# Copy application code
 COPY app/ ./app/
 
 ENV PATH="/app/.venv/bin:$PATH"

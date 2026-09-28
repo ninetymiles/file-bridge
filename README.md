@@ -27,44 +27,30 @@
 
 ### 启动应用
 
-项目通过 FastAPI 提供 REST API 服务。
+项目支持通过CLI命令行方式启动应用，默认会自动加载 .env 文件中的环境变量。
 
 ```shell
-$ uv run uvicorn app.main:app
-$ uv run app/main.py
 $ uv run python -m app.main
 ```
 
-默认监听 127.0.0.1:8000，可通过参数 --host 0.0.0.0 --port 8000 或环境变量 UVICORN_HOST=0.0.0.0 UVICORN_PORT=8000 指定监听地址和端口
-
-### 测试接口
-
-冒烟测试，服务器部署完成之后验证服务正常
-
-```shell
-$ uv run python -m tests.test_smoke # 打印测试报告
-```
-
-Pytest 单元测试
+### 单元测试
 
 ```shell
 $ uv run pytest
-$ uv run pytest -m smoke # 冒烟测试，不打印报告，只收集结果
 ```
 
 ### 打包发布
-
-**快速开始**：
-
-日常开发使用 `uv run` 直接运行，无需 Docker：
-```shell
-$ uv run uvicorn app.main:app --reload
-```
 
 本地验证打包，镜像名 'file-bridge:latest'
 
 ```shell
 $ docker build --tag file-bridge .
+```
+
+或者通过 docker-compose 打包：
+
+```shell
+$ docker compose build
 ```
 
 发布版本时，推送 tag 触发自动构建：
@@ -87,26 +73,16 @@ $ docker pull <username>/file-bridge:1.2.3
 $ docker run -d \
   --restart unless-stopped \
   --name file-bridge \
-  -p 8000:8000 \
   -v /path/to/storage:/out \
   <username>/file-bridge:1.2.3
 ```
 
-或使用 docker-compose：
+或使用 docker-compose 启动容器：
 ```shell
 $ docker compose up -d
-```
-
-docker-compose 配置默认不映射端口，如果需要映射端口，通过 docker-compose.override.yml 指定：
-```yaml
-services:
-  api:
-    ports:
-      - "127.0.0.1:8000:8000"
 ```
 
 ### 附录
 
 - [DingTalk](https://open.dingtalk.com/document/resourcedownload/Introduction-to-stream-mode)
 - [DingTalkSDK](https://github.com/open-dingtalk/dingtalk-stream-sdk-python)
-- [FastAPI](https://fastapi.tiangolo.com/)
