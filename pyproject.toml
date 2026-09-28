@@ -1,7 +1,7 @@
 [project]
 name = "file-bridge"
 version = "0.1.0"
-description = "Dingding bot stream backend."
+description = "DingTak chat bot backend."
 readme = "README.md"
 
 requires-python = ">=3.14"
