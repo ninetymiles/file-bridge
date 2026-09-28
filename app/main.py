@@ -115,11 +115,11 @@ def parse_config(args: Optional[List[str]] = None) -> argparse.Namespace:
 
 def create_pipeline(
     output_dir: str,
+    metadata_store: MetadataStore,
     dingtalk_client,
     logger: Optional[logging.Logger] = None,
 ) -> PipelineHandler:
     """Construct and configure the message pipeline with handlers."""
-    metadata_store = MetadataStore(output_dir=output_dir)
     file_downloader = FileDownloader(
         output_dir=output_dir,
         dingtalk_client=dingtalk_client,
@@ -149,7 +149,11 @@ def main(args=None):
     credential = dingtalk_stream.Credential(config.client_id, config.client_secret)
     client = dingtalk_stream.DingTalkStreamClient(credential, logger=logger)
 
-    pipeline = create_pipeline(config.output_dir, client, logger)
+    metadata_store = MetadataStore(output_dir=config.output_dir)
+    cleaned, remaining = metadata_store.rebuild_index()
+    logger.info("Index rebuilt: cleaned %d records, %d records remain", cleaned, remaining)
+
+    pipeline = create_pipeline(config.output_dir, metadata_store, client, logger)
     client.register_callback_handler(dingtalk_stream.chatbot.ChatbotMessage.TOPIC, pipeline)
 
     notifier = LifecycleNotifier(

@@ -7,6 +7,7 @@ from unittest.mock import MagicMock, AsyncMock
 import httpx
 from dingtalk_stream import CallbackMessage, AckMessage
 from app.main import create_pipeline
+from app.services.metadata_store import MetadataStore
 
 
 @pytest.mark.asyncio
@@ -31,7 +32,8 @@ async def test_end_to_end_file_and_rebuild_index_pipeline(tmp_path):
     mock_client.credential.client_id = "test_robot"
     mock_client.get_access_token = MagicMock(return_value="mock_access_token")
 
-    pipeline = create_pipeline(str(output_dir), mock_client)
+    metadata_store = MetadataStore(output_dir=str(output_dir))
+    pipeline = create_pipeline(str(output_dir), metadata_store, mock_client)
     # Inject test http_client
     for handler in pipeline.handlers:
         if hasattr(handler, "file_downloader"):
