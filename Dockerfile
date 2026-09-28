@@ -19,7 +19,6 @@ RUN uv sync --no-dev --no-cache
 # Copy application code
 COPY app/ ./app/
 
-EXPOSE 8000
 ENV PATH="/app/.venv/bin:$PATH"
 ENV PYTHONUNBUFFERED=1
 
