@@ -112,18 +112,4 @@ async def test_end_to_end_file_and_rebuild_index_pipeline(tmp_path):
     assert len(replies) == 3
     assert "索引重建完成，清理元数据 1 条，现有有效索引 0 条。" in replies[2][0]
 
-    # 5. Send calculation text message (fallback handler)
-    cb_msg4 = CallbackMessage()
-    cb_msg4.data = {
-        "msgtype": "text",
-        "senderNick": "User",
-        "sessionWebhook": "https://webhook.mock",
-        "text": {"content": "10 + 25"},
-    }
-
-    status, msg = await pipeline.process(cb_msg4)
-    assert status == AckMessage.STATUS_OK
-    assert len(replies) == 4
-    assert replies[3][0] == "Q: 10 + 25\nA: 35"
-
     await http_client.aclose()

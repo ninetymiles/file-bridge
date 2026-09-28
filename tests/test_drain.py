@@ -13,36 +13,75 @@ def make_callback() -> "ChatbotMessage":
     return MagicMock(data={"msgtype": "text", "text": {"content": "1+1"}})
 
 
-class BlockingHandler(BaseMessageHandler):
-    """Simulates a download-in-progress task: awaits until cancelled."""
+class DownloadingHandler(BaseMessageHandler):
+    """Mirrors MediaFileHandler: owns an interruptible download sub-task.
+
+    cancel_tasks() cancels the in-flight download; handle() catches the
+    cancellation, replies, and returns True so the SDK task ends normally.
+    """
 
     def __init__(self):
-        self.started = asyncio.Event()
-        self.finished = False
+        self.download_started = asyncio.Event()
+        self.replied_cancellation = False
+        self._interruptible_tasks: set[asyncio.Task] = set()
+
+    def cancel_tasks(self) -> None:
+        for task in list(self._interruptible_tasks):
+            task.cancel()
 
     async def handle(self, message, raw_data, pipeline) -> bool:
-        self.started.set()
-        await asyncio.sleep(3600)
-        self.finished = True
+        async def download():
+            self.download_started.set()
+            await asyncio.sleep(3600)
+
+        download_task = asyncio.create_task(download())
+        self._interruptible_tasks.add(download_task)
+        try:
+            await download_task
+        except asyncio.CancelledError:
+            self.replied_cancellation = True
+            await pipeline.async_reply_text("服务正在关闭，下载任务已取消", message)
+            return True
+        finally:
+            self._interruptible_tasks.discard(download_task)
         return True
 
 
-class CommittingHandler(BaseMessageHandler):
-    """Simulates a past-download-point task: marks, then finishes naturally."""
+class ArchivingHandler(BaseMessageHandler):
+    """Download completes fast, then archive runs inline (non-interruptible).
 
-    def __init__(self, delay: float = 0.05):
-        self.delay = delay
-        self.finished = False
+    cancel_tasks() finds nothing to cancel once download is done; archive
+    must always finish even when drain begins mid-archive.
+    """
+
+    def __init__(self, archive_delay: float = 0.05):
+        self.archive_finished = False
+        self.archive_delay = archive_delay
+        self._interruptible_tasks: set[asyncio.Task] = set()
+
+    def cancel_tasks(self) -> None:
+        for task in list(self._interruptible_tasks):
+            task.cancel()
 
     async def handle(self, message, raw_data, pipeline) -> bool:
-        pipeline.mark_download_done()
-        await asyncio.sleep(self.delay)
-        self.finished = True
+        async def download():
+            return "done"
+
+        download_task = asyncio.create_task(download())
+        self._interruptible_tasks.add(download_task)
+        try:
+            await download_task
+        finally:
+            self._interruptible_tasks.discard(download_task)
+
+        # Archive: non-interruptible, must finish regardless of drain.
+        await asyncio.sleep(self.archive_delay)
+        self.archive_finished = True
         return True
 
 
 class MarkingHandler(BaseMessageHandler):
-    """Records whether mark_download_done found the calling task registered."""
+    """Records whether the SDK task was registered during handle()."""
 
     def __init__(self):
         self.was_registered = None
@@ -64,7 +103,7 @@ async def test_gate_rejects_processing_after_begin_drain():
 
     assert (status, msg) == (AckMessage.STATUS_OK, "OK")
     handler.handle.assert_not_awaited()
-    assert pipeline._active_tasks == {}
+    assert pipeline._active_tasks == set()
 
 
 @pytest.mark.asyncio
@@ -75,47 +114,46 @@ async def test_task_registers_for_drain_and_deregisters_on_finish():
     await pipeline.process(make_callback())
 
     assert handler.was_registered is True
-    assert pipeline._active_tasks == {}
+    assert pipeline._active_tasks == set()
 
 
 @pytest.mark.asyncio
-async def test_drain_cancels_unmarked_task_which_replies_and_reraises():
-    blocking = BlockingHandler()
-    pipeline = PipelineHandler([blocking])
+async def test_begin_drain_cancels_interruptible_download_via_handler():
+    downloading = DownloadingHandler()
+    pipeline = PipelineHandler([downloading])
     pipeline.async_reply_text = AsyncMock()
 
     task = asyncio.create_task(pipeline.process(make_callback()))
-    await asyncio.wait_for(blocking.started.wait(), timeout=1.0)
+    await asyncio.wait_for(downloading.download_started.wait(), timeout=1.0)
     assert task in pipeline._active_tasks
 
     pipeline.begin_drain()
     await asyncio.wait_for(pipeline.drain_active_tasks(timeout=5.0), timeout=5.0)
 
-    # The blocked task was cancelled: it must not have completed normally.
-    with pytest.raises(asyncio.CancelledError):
-        await asyncio.wait_for(task, timeout=1.0)
-    assert blocking.finished is False
-    assert task.cancelled()
-    assert pipeline._active_tasks == {}
+    # SDK task ends normally: handler caught the sub-task cancellation,
+    # replied, and returned True. It was NOT cancelled itself.
+    await asyncio.wait_for(task, timeout=1.0)
+    assert downloading.replied_cancellation is True
+    assert not task.cancelled()
+    assert pipeline._active_tasks == set()
 
 
 @pytest.mark.asyncio
-async def test_drain_waits_for_marked_task_to_finish_commit():
-    committing = CommittingHandler()
-    pipeline = PipelineHandler([committing])
+async def test_drain_waits_for_non_interruptible_archive_to_finish():
+    archiving = ArchivingHandler()
+    pipeline = PipelineHandler([archiving])
 
     task = asyncio.create_task(pipeline.process(make_callback()))
-    # Let the task reach mark_download_done() (set synchronously in handle).
-    await asyncio.sleep(0)
-    await asyncio.sleep(0)
+    # Let download finish and archive start.
+    await asyncio.sleep(0.01)
 
     pipeline.begin_drain()
     await asyncio.wait_for(pipeline.drain_active_tasks(timeout=5.0), timeout=5.0)
 
     await asyncio.wait_for(task, timeout=1.0)
-    assert committing.finished is True  # commit phase ran to completion
+    assert archiving.archive_finished is True  # archive ran to completion
     assert not task.cancelled()
-    assert pipeline._active_tasks == {}
+    assert pipeline._active_tasks == set()
 
 
 @pytest.mark.asyncio
@@ -156,29 +194,28 @@ async def test_download_cancel_midstream_cleans_temp_file(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_drain_timeout_abandons_stuck_task(caplog):
-    """A task that lingers after the first cancel (e.g. finishing an
-    unbreakable cleanup) stays pending past the drain timeout and is
-    abandoned with an INFO log."""
+async def test_drain_timeout_abandons_stuck_task():
+    """A handler stuck in non-interruptible work cannot be cancelled by drain.
 
-    class StubbornHandler(BaseMessageHandler):
+    drain waits, times out, and abandons the task; the task remains pending
+    after drain returns (it is cleaned up manually by the test).
+    """
+
+    class StuckHandler(BaseMessageHandler):
         async def handle(self, message, raw_data, pipeline) -> bool:
-            try:
-                await asyncio.sleep(3600)
-            except asyncio.CancelledError:
-                pass  # swallow the first cancel, linger a while
-            await asyncio.sleep(0.3)
-            raise asyncio.CancelledError
+            await asyncio.sleep(3600)
+            return True
 
-    pipeline = PipelineHandler([StubbornHandler()])
+    pipeline = PipelineHandler([StuckHandler()])
 
     task = asyncio.create_task(pipeline.process(make_callback()))
-    await asyncio.sleep(0.05)  # let the task park in its first sleep
+    await asyncio.sleep(0.05)  # let the task park in its sleep
 
     pipeline.begin_drain()
-    with caplog.at_level("INFO"):
-        await asyncio.wait_for(pipeline.drain_active_tasks(timeout=0.05), timeout=1.0)
+    await asyncio.wait_for(pipeline.drain_active_tasks(timeout=0.05), timeout=1.0)
 
-    assert "abandoning 1 unfinished task" in caplog.text
+    # Stuck task is still pending: drain could not cancel it.
+    assert not task.done()
+    task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task

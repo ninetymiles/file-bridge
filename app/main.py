@@ -15,7 +15,6 @@ from app.handlers import (
     PipelineHandler,
     CommandHandler,
     MediaFileHandler,
-    CalcBotFallbackHandler,
 )
 
 dotenv.load_dotenv()
@@ -135,7 +134,6 @@ def create_pipeline(
                 file_downloader=file_downloader,
                 logger=logger,
             ),
-            CalcBotFallbackHandler(logger=logger),
         ],
         logger=logger,
     )

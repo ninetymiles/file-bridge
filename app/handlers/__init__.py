@@ -2,7 +2,6 @@
 
 from app.handlers.message import (
     BaseMessageHandler,
-    CalcBotFallbackHandler,
     CommandHandler,
     MediaFileHandler,
     PipelineHandler,
@@ -13,5 +12,4 @@ __all__ = [
     "PipelineHandler",
     "CommandHandler",
     "MediaFileHandler",
-    "CalcBotFallbackHandler",
 ]
