@@ -12,18 +12,14 @@
 
 群晖有Container套件，可以部署DockerImage，钉钉企业群机器人支持Stream模式API，可以使用WebSocket长连接接受数据推送，不需要服务器提供公网IP和域名访问，非常适合用来做单向的文件保存通道。
 
-### 平台投递限制
+### 创建机器人
 
-钉钉平台对机器人回调消息的投递范围有限制：
-
-| 场景 | 可接收消息类型 | 说明 |
-|------|---------------|------|
-| 单聊 | text、picture、video、file、richText | 全部支持 |
-| 群聊 | text、richText（仅图片段） | 必须 @ 机器人；文件、视频、语音平台不投递 |
-
-- 群聊中发送文件、视频、语音时，平台不会向机器人投递回调，请通过单聊发送。
-- 群聊图片以 `richText` 消息的图片段形式投递，支持单张或多张。
-- 群聊 `text` 消息中 `@机器人名` 由平台自动剥离，机器人收到的是去除 @ 后的文本。
+- 登录[钉钉开发者平台](https://open-dev.dingtalk.com/)。
+- 创建企业内部钉钉应用。
+- 查看应用详情，从凭证与基础信息 获取 ClientID 和 ClientSecret。
+- 启用机器人配置，消息接收模式选择 Stream 模式。
+- 权限管理，开通互动卡片实例写权限。
+- 版本管理与发布，新建版本，确认应用信息和机器人配置，发布到企业里。
 
 ### 启动应用
 
@@ -81,6 +77,13 @@ $ docker run -d \
 ```shell
 $ docker compose up -d
 ```
+
+### 群晖配置
+
+- 控制面板终端机和SNMP启用SSH (群晖 ContainerManager GUI 不支持 GitHub 仓库)
+- SSH 使用群晖管理员账号登录
+- 执行sudo docker pull ghcr.io/<user-name>/<repo-name>:<tag-name>
+- 打开 ContainerManager 新增项目，使用 docker-compose 配置创建容器
 
 ### 附录
 
