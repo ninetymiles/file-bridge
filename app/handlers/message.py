@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import os
+import random
 import re
 from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Callable
@@ -50,6 +51,113 @@ class BaseMessageHandler(ABC):
 
 CommandAction = Callable[[ChatbotMessage, dict, "PipelineHandler"], Awaitable[None]]
 
+# Guidance replies for text messages that match no command. The reply is
+# composed from three orthogonal dimensions, each picked at random; all
+# wording is fixed in code. See build_guide_reply().
+
+# Dimension 1: empathy prefix; attached only when real text was sent.
+UNMATCHED_PREFIX_TEXTS = (
+    "不好意思，这句话我还没太听懂。",
+    "哎呀，这条我有点没反应过来。",
+    "抱歉，我暂时还没理解你的意思。",
+    "嗯……这句话我还没学会。",
+    "咦，这条消息我没看懂呢。",
+    "抱歉呀，我没能明白你的意思。",
+    "不好意思，你说的我有点跟不上。",
+    "哎呀，这句话我暂时理解不了。",
+    "抱歉抱歉，这条我还没搞懂。",
+    "嗯？这个表达我还不太明白。",
+    "咦，我好像没理解对意思。",
+    "不好意思呀，这句话我需要再学学。",
+)
+
+# Dimension 2: list shell + per-capability wording. Capability wording is
+# the only place carrying platform limits (files/videos stay single-chat);
+# every variant is a verb phrase so it fits all shells.
+GUIDE_BODY_TEMPLATES = (
+    "我可以帮您：\n{caps}",
+    "目前我支持这些操作：\n{caps}",
+    "我能做的事情包括：\n{caps}",
+    "您可以试试让我：\n{caps}",
+    "我的本领有这些：\n{caps}",
+    "我现在可以为您：\n{caps}",
+    "我擅长的事情是：\n{caps}",
+    "具体来说，我可以：\n{caps}",
+    "这些事尽管交给我：\n{caps}",
+    "我目前的能力有：\n{caps}",
+    "让我来为您：\n{caps}",
+    "您可以这样使用我：\n{caps}",
+)
+
+CAPABILITY_VARIANTS = (
+    (
+        "在群聊中接收您 @ 我发送的图片",
+        "在群里接收您通过 @ 我发来的图片",
+        "接收群成员 @ 我发送的图片",
+        "处理群聊中 @ 我发来的图片",
+        "在群聊里接收您 @ 我发出的图片",
+        "接收您在群中 @ 我发送的图片",
+    ),
+    (
+        "在单聊中接收您直接发送的图片",
+        "接收您在私聊里直接发来的图片",
+        "在一对一聊天中接收您发的图片",
+        "接收单聊中无需 @ 直接发送的图片",
+        "在单聊里接收您随手发来的图片",
+        "接收您在单聊直接发给我的图片",
+    ),
+    (
+        "在单聊中接收文件和视频",
+        "接收您在私聊发来的文件与视频",
+        "在单聊里处理文件和视频的接收",
+        "接收您通过一对一聊天发送的文件、视频",
+        "在单聊中接收您发来的视频和文件",
+        "接收私聊场景下的文件和视频",
+    ),
+    (
+        "把收到的内容自动保存到服务器",
+        "将接收到的文件自动存档到服务器",
+        "自动把您发来的内容妥善保存",
+        "对收到的内容执行自动落盘保存",
+        "把所有接收内容自动存到服务器",
+        "将收到的内容自动保存归档",
+    ),
+)
+
+# Dimension 3: ending prompt.
+GUIDE_ENDING_TEXTS = (
+    "请问您想做什么？",
+    "您可以直接告诉我指令哦。",
+    "需要我帮您做什么呢？",
+    "请告诉我您的需求吧。",
+    "想先试试哪一个？",
+    "您想从哪一项开始呢？",
+    "现在就可以发给我试试哦。",
+    "有需要随时叫我。",
+    "您希望我先帮您做什么？",
+    "有什么我可以帮您的吗？",
+    "随时把内容发给我就好。",
+    "期待您的指令哦。",
+)
+
+
+def build_guide_reply(has_real_text: bool) -> str:
+    """Compose one unmatched-command guidance reply.
+
+    Prefix is included only when the sender actually sent text; empty
+    content gets the capability list straight away.
+    """
+    prefix = random.choice(UNMATCHED_PREFIX_TEXTS) if has_real_text else ""
+    lines = [f"• {random.choice(variants)}" for variants in CAPABILITY_VARIANTS]
+    lines[-1] = f"{lines[-1]}。"
+    body = random.choice(GUIDE_BODY_TEMPLATES).format(caps="\n".join(lines))
+    return f"{prefix}{body}\n{random.choice(GUIDE_ENDING_TEXTS)}"
+
+
+# Explicit replies for delivered-but-unsupported message types (single chat).
+UNSUPPORTED_AUDIO_TEXT = "不好意思，语音消息我暂时还不支持接收哦。"
+UNSUPPORTED_TYPE_TEXT = "不好意思，这种类型的消息我暂时还不支持接收。"
+
 
 class CommandHandler(BaseMessageHandler):
     """Resolve text commands with a matcher and dispatch them by command id."""
@@ -73,6 +181,7 @@ class CommandHandler(BaseMessageHandler):
         """Match and execute command messages like '重建索引'."""
         msgtype = message.message_type or raw_data.get("msgtype")
 
+        has_picture = False
         if msgtype == "text":
             content = ""
             if message.text and message.text.content:
@@ -81,32 +190,41 @@ class CommandHandler(BaseMessageHandler):
                 content = raw_data["text"].get("content", "")
         elif msgtype == "richText":
             segments = (raw_data.get("content") or {}).get("richText") or []
-            content = self._merge_rich_text(segments)
+            content, has_picture = self._merge_rich_text(segments)
             self.logger.debug("RichText merged text: %s", content)
         else:
             return False
 
         normalized = normalize_command_text(content)
-        if not normalized:
-            return False
 
-        command_id = await self._matcher.match(normalized)
-        if command_id is None:
-            return False
+        # Empty text skips the matcher entirely (no embedding inference in
+        # semantic mode) and is simply treated as no match.
+        command_id = await self._matcher.match(normalized) if normalized else None
 
-        self.logger.info("Command matched: %s", command_id)
-        await self._dispatch_table[command_id](message, raw_data, pipeline)
+        if command_id is not None:
+            self.logger.info("Command matched: %s", command_id)
+            await self._dispatch_table[command_id](message, raw_data, pipeline)
+        elif not has_picture:
+            # No command and no picture segment: guide the sender on how the
+            # bot can be used. Messages carrying pictures stay silent here;
+            # their save result is reported by the media flow instead.
+            await pipeline.async_reply_text(build_guide_reply(bool(normalized)), message)
+
         # Commands do not halt the chain so a richText message can both run a
         # command and let MediaFileHandler archive its pictures.
         return False
 
     @staticmethod
-    def _merge_rich_text(segments) -> str:
+    def _merge_rich_text(segments) -> tuple[str, bool]:
         """Merge richText segments into a single semantic text string.
 
         Text segments are concatenated as-is, except standalone @ mention
         segments (matching ^@\\S+$) are removed. Picture segments are
         replaced with <imgN> placeholders (N starts at 1).
+
+        Returns the merged text and a flag telling whether any picture
+        segment was present; the flag is the "has picture" signal reused
+        by the unmatched-command fallback decision.
         """
         result_parts = []
         img_counter = 0
@@ -121,7 +239,7 @@ class CommandHandler(BaseMessageHandler):
             elif "downloadCode" in seg:
                 img_counter += 1
                 result_parts.append(f"<img{img_counter}>")
-        return "".join(result_parts)
+        return "".join(result_parts), img_counter > 0
 
 
 class MediaFileHandler(BaseMessageHandler):
@@ -159,6 +277,12 @@ class MediaFileHandler(BaseMessageHandler):
         """Handle picture, video, file, and richText messages."""
         msgtype = message.message_type or raw_data.get("msgtype")
         if msgtype not in self.SUPPORTED_MSG_TYPES:
+            # Only single chat can deliver such frames (groups never get
+            # file/video/audio): tell the sender clearly instead of silence.
+            conversation_type = message.conversation_type or raw_data.get("conversationType")
+            if conversation_type == "1":
+                reply = UNSUPPORTED_AUDIO_TEXT if msgtype == "audio" else UNSUPPORTED_TYPE_TEXT
+                await pipeline.async_reply_text(reply, message)
             return False
 
         content = raw_data.get("content") or {}

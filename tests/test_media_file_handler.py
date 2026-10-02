@@ -5,7 +5,16 @@ import pytest
 from unittest.mock import AsyncMock, MagicMock
 from dingtalk_stream import ChatbotMessage
 from app.handlers import MediaFileHandler, PipelineHandler
+from app.handlers.message import UNSUPPORTED_AUDIO_TEXT, UNSUPPORTED_TYPE_TEXT
 from app.services.file_downloader import DownloadResult
+
+
+def _unsupported_type_handler():
+    return MediaFileHandler(
+        output_dir=".",
+        metadata_store=MagicMock(),
+        file_downloader=MagicMock(),
+    )
 
 @pytest.mark.asyncio
 async def test_media_file_handler_new_file(tmp_path):
@@ -380,3 +389,56 @@ async def test_rich_text_partial_failure(tmp_path):
     lines = reply_text.split("\n")
     assert "文件接收处理失败，请稍后重试" in lines[0]
     assert "文件接收成功，已保存为:" in lines[1]
+
+
+@pytest.mark.asyncio
+async def test_media_file_handler_single_chat_audio_rejected():
+    handler = _unsupported_type_handler()
+    mock_pipeline = MagicMock(spec=PipelineHandler)
+    mock_pipeline.async_reply_text = AsyncMock()
+
+    raw_data = {
+        "msgtype": "audio",
+        "conversationType": "1",
+        "content": {"downloadCode": "code_audio", "duration": 1000},
+    }
+    msg = ChatbotMessage.from_dict(raw_data)
+
+    handled = await handler.handle(msg, raw_data, mock_pipeline)
+
+    assert handled is False
+    mock_pipeline.async_reply_text.assert_awaited_once_with(UNSUPPORTED_AUDIO_TEXT, msg)
+
+
+@pytest.mark.asyncio
+async def test_media_file_handler_single_chat_unknown_type_rejected():
+    handler = _unsupported_type_handler()
+    mock_pipeline = MagicMock(spec=PipelineHandler)
+    mock_pipeline.async_reply_text = AsyncMock()
+
+    raw_data = {"msgtype": "sticker", "conversationType": "1"}
+    msg = ChatbotMessage.from_dict(raw_data)
+
+    handled = await handler.handle(msg, raw_data, mock_pipeline)
+
+    assert handled is False
+    mock_pipeline.async_reply_text.assert_awaited_once_with(UNSUPPORTED_TYPE_TEXT, msg)
+
+
+@pytest.mark.asyncio
+async def test_media_file_handler_group_unknown_type_stays_silent():
+    handler = _unsupported_type_handler()
+    mock_pipeline = MagicMock(spec=PipelineHandler)
+    mock_pipeline.async_reply_text = AsyncMock()
+
+    raw_data = {
+        "msgtype": "audio",
+        "conversationType": "2",
+        "content": {"downloadCode": "code_audio"},
+    }
+    msg = ChatbotMessage.from_dict(raw_data)
+
+    handled = await handler.handle(msg, raw_data, mock_pipeline)
+
+    assert handled is False
+    mock_pipeline.async_reply_text.assert_not_awaited()
