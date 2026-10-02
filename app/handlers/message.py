@@ -6,11 +6,13 @@ import logging
 import os
 import re
 from abc import ABC, abstractmethod
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
 import dingtalk_stream
 from dingtalk_stream import AckMessage, CallbackMessage, ChatbotMessage
 
+from app.services.command_matching import BaseCommandMatcher, normalize_command_text
 from app.utils.file_storage import save_file
 
 
@@ -46,11 +48,20 @@ class BaseMessageHandler(ABC):
         return None
 
 
-class CommandHandler(BaseMessageHandler):
-    """Handler for command-based chatbot text messages."""
+CommandAction = Callable[[ChatbotMessage, dict, "PipelineHandler"], Awaitable[None]]
 
-    def __init__(self, metadata_store, logger: Optional[logging.Logger] = None):
-        self.metadata_store = metadata_store
+
+class CommandHandler(BaseMessageHandler):
+    """Resolve text commands with a matcher and dispatch them by command id."""
+
+    def __init__(
+        self,
+        matcher: BaseCommandMatcher,
+        dispatch_table: dict[str, CommandAction],
+        logger: Optional[logging.Logger] = None,
+    ):
+        self._matcher = matcher
+        self._dispatch_table = dispatch_table
         self.logger = logger or logging.getLogger(__name__)
 
     async def handle(
@@ -75,16 +86,18 @@ class CommandHandler(BaseMessageHandler):
         else:
             return False
 
-        content = content.strip()
-
-        # Check for '重建索引' command
-        if "重建索引" in content:
-            self.logger.info("Command matched: 重建索引")
-            cleaned_count, remaining_count = await self.metadata_store.async_rebuild_index()
-            response_text = f"索引重建完成，清理元数据 {cleaned_count} 条，现有有效索引 {remaining_count} 条。"
-            await pipeline.async_reply_text(response_text, message)
+        normalized = normalize_command_text(content)
+        if not normalized:
             return False
 
+        command_id = await self._matcher.match(normalized)
+        if command_id is None:
+            return False
+
+        self.logger.info("Command matched: %s", command_id)
+        await self._dispatch_table[command_id](message, raw_data, pipeline)
+        # Commands do not halt the chain so a richText message can both run a
+        # command and let MediaFileHandler archive its pictures.
         return False
 
     @staticmethod

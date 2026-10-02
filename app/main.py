@@ -7,6 +7,7 @@ from typing import List, Optional
 import dingtalk_stream
 import dotenv
 
+from app.services.command_matching import REBUILD_INDEX, build_command_matcher
 from app.services.metadata_store import MetadataStore
 from app.services.file_downloader import FileDownloader
 from app.services.lifecycle_notifier import LifecycleNotifier
@@ -116,6 +117,7 @@ def create_pipeline(
     output_dir: str,
     metadata_store: MetadataStore,
     dingtalk_client,
+    matcher,
     logger: Optional[logging.Logger] = None,
 ) -> PipelineHandler:
     """Construct and configure the message pipeline with handlers."""
@@ -125,9 +127,23 @@ def create_pipeline(
         logger=logger,
     )
 
+    command_logger = logger if logger is not None else logging.getLogger("file-bridge")
+
+    async def rebuild_index(message, raw_data, pipeline) -> None:
+        command_logger.info("Received rebuild index command")
+        cleaned, remaining = await metadata_store.async_rebuild_index()
+        response_text = f"索引重建完成，清理元数据 {cleaned} 条，现有有效索引 {remaining} 条。"
+        await pipeline.async_reply_text(response_text, message)
+
+    dispatch_table = {REBUILD_INDEX: rebuild_index}
+
     pipeline = PipelineHandler(
         handlers=[
-            CommandHandler(metadata_store=metadata_store, logger=logger),
+            CommandHandler(
+                matcher=matcher,
+                dispatch_table=dispatch_table,
+                logger=logger,
+            ),
             MediaFileHandler(
                 output_dir=output_dir,
                 metadata_store=metadata_store,
@@ -151,7 +167,8 @@ def main(args=None):
     cleaned, remaining = metadata_store.rebuild_index()
     logger.info("Index rebuilt: cleaned %d records, %d records remain", cleaned, remaining)
 
-    pipeline = create_pipeline(config.output_dir, metadata_store, client, logger)
+    matcher = build_command_matcher()
+    pipeline = create_pipeline(config.output_dir, metadata_store, client, matcher, logger)
     client.register_callback_handler(dingtalk_stream.chatbot.ChatbotMessage.TOPIC, pipeline)
 
     notifier = LifecycleNotifier(

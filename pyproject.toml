@@ -7,6 +7,7 @@ readme = "README.md"
 requires-python = ">=3.14"
 dependencies = [
     "dingtalk-stream>=0.24.3",
+    "fastembed>=0.8.1",
     "httpx>=0.27.0",
     "python-dotenv>=1.2.3",
 ]
@@ -23,3 +24,9 @@ dev = [
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
+addopts = "-m general"
+strict_markers = true
+markers = [
+    "general: default test set for CI and daily runs (everything except opt-in sets; never loads the embedding model)",
+    "semantic: real embedding-model acceptance tests; run explicitly with 'pytest -m semantic'",
+]
