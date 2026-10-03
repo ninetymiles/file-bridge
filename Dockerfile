@@ -8,6 +8,11 @@ WORKDIR /app
 COPY uv.lock pyproject.toml ./
 RUN uv sync --no-dev --no-cache
 
+# pymediainfo runtime dependency (shared library only, far lighter than ffmpeg).
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends libmediainfo0v5 \
+    && rm -rf /var/lib/apt/lists/*
+
 COPY app/ ./app/
 
 ENV PATH="/app/.venv/bin:$PATH"

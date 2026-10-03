@@ -1,9 +1,12 @@
 """Substring-based command matcher, standard library only."""
 
+import logging
 from collections.abc import Mapping
 
 from .base import BaseCommandMatcher
 from .catalog import COMMAND_CATALOG
+
+logger = logging.getLogger("file-bridge.command")
 
 
 class SubstringCommandMatcher(BaseCommandMatcher):
@@ -16,4 +19,5 @@ class SubstringCommandMatcher(BaseCommandMatcher):
         for command_id, phrases in self._catalog:
             if any(phrase in text for phrase in phrases):
                 return command_id
+        logger.debug("Substring match missed for text: %s", text)
         return None

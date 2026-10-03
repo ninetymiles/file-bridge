@@ -2,7 +2,7 @@
 
 import os
 import pytest
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 from dingtalk_stream import ChatbotMessage
 from app.handlers import MediaFileHandler, PipelineHandler
 from app.handlers.message import UNSUPPORTED_AUDIO_TEXT, UNSUPPORTED_TYPE_TEXT
@@ -442,3 +442,128 @@ async def test_media_file_handler_group_unknown_type_stays_silent():
 
     assert handled is False
     mock_pipeline.async_reply_text.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_single_media_reply_includes_metadata_line(tmp_path):
+    output_dir = tmp_path / "output"
+    temp_file = tmp_path / "temp_video.tmp"
+    temp_file.write_bytes(b"video bytes")
+
+    mock_downloader = MagicMock()
+    mock_downloader.get_download_url = AsyncMock(return_value="https://example.com/dl")
+    mock_downloader.download_file_stream = AsyncMock(
+        return_value=DownloadResult(temp_path=str(temp_file), sha256="v_sha", file_size=11)
+    )
+
+    mock_store = MagicMock()
+    mock_store.async_is_duplicate = AsyncMock(return_value=False)
+    mock_store.async_insert_record = AsyncMock(return_value=1)
+
+    mock_pipeline = MagicMock(spec=PipelineHandler)
+    mock_pipeline.async_reply_text = AsyncMock()
+
+    handler = MediaFileHandler(output_dir=str(output_dir), metadata_store=mock_store, file_downloader=mock_downloader)
+
+    raw_data = {
+        "msgtype": "video",
+        "senderNick": "Charlie",
+        "content": {"downloadCode": "vc", "fileName": "demo.mp4"},
+    }
+    msg = ChatbotMessage.from_dict(raw_data)
+
+    with patch("app.handlers.message.extract_media_metadata", return_value="544x960  30.2fps"):
+        await handler.handle(msg, raw_data, mock_pipeline)
+
+    reply_text = mock_pipeline.async_reply_text.call_args[0][0]
+    lines = reply_text.split("\n")
+    assert lines[0].startswith("文件接收成功，已保存为:")
+    assert lines[1] == "544x960  30.2fps"
+
+
+@pytest.mark.asyncio
+async def test_single_media_reply_no_metadata_stays_filename_only(tmp_path):
+    output_dir = tmp_path / "output"
+    temp_file = tmp_path / "temp_pic.tmp"
+    temp_file.write_bytes(b"pic bytes")
+
+    mock_downloader = MagicMock()
+    mock_downloader.get_download_url = AsyncMock(return_value="https://example.com/dl")
+    mock_downloader.download_file_stream = AsyncMock(
+        return_value=DownloadResult(temp_path=str(temp_file), sha256="p_sha", file_size=9)
+    )
+
+    mock_store = MagicMock()
+    mock_store.async_is_duplicate = AsyncMock(return_value=False)
+    mock_store.async_insert_record = AsyncMock(return_value=1)
+
+    mock_pipeline = MagicMock(spec=PipelineHandler)
+    mock_pipeline.async_reply_text = AsyncMock()
+
+    handler = MediaFileHandler(output_dir=str(output_dir), metadata_store=mock_store, file_downloader=mock_downloader)
+
+    raw_data = {
+        "msgtype": "picture",
+        "senderNick": "Alice",
+        "content": {"downloadCode": "pc"},
+    }
+    msg = ChatbotMessage.from_dict(raw_data)
+
+    with patch("app.handlers.message.extract_media_metadata", return_value=None):
+        await handler.handle(msg, raw_data, mock_pipeline)
+
+    reply_text = mock_pipeline.async_reply_text.call_args[0][0]
+    assert reply_text.startswith("文件接收成功，已保存为:")
+    assert "\n" not in reply_text  # no metadata line appended
+
+
+@pytest.mark.asyncio
+async def test_rich_text_reply_appends_per_image_metadata(tmp_path):
+    output_dir = tmp_path / "output"
+    temp1 = tmp_path / "t1.tmp"
+    temp1.write_bytes(b"pic1")
+    temp2 = tmp_path / "t2.tmp"
+    temp2.write_bytes(b"pic2")
+
+    results = [
+        DownloadResult(temp_path=str(temp1), sha256="sha1", file_size=4),
+        DownloadResult(temp_path=str(temp2), sha256="sha2", file_size=4),
+    ]
+    mock_downloader = MagicMock()
+    mock_downloader.get_download_url = AsyncMock(return_value="https://example.com/dl")
+    mock_downloader.download_file_stream = AsyncMock(side_effect=results)
+
+    mock_store = MagicMock()
+    mock_store.async_is_duplicate = AsyncMock(return_value=False)
+    mock_store.async_insert_record = AsyncMock(return_value=1)
+
+    mock_pipeline = MagicMock(spec=PipelineHandler)
+    mock_pipeline.async_reply_text = AsyncMock()
+
+    handler = MediaFileHandler(output_dir=str(output_dir), metadata_store=mock_store, file_downloader=mock_downloader)
+
+    raw_data = {
+        "msgtype": "richText",
+        "content": {
+            "richText": [
+                {"type": "picture", "downloadCode": "code_1"},
+                {"type": "picture", "downloadCode": "code_2"},
+            ]
+        },
+    }
+    msg = ChatbotMessage.from_dict(raw_data)
+
+    # First image has metadata, second has none.
+    with patch(
+        "app.handlers.message.extract_media_metadata",
+        side_effect=["2024-01-15 14:30:00  f/2.8  ISO 400", None],
+    ):
+        await handler.handle(msg, raw_data, mock_pipeline)
+
+    reply_text = mock_pipeline.async_reply_text.call_args[0][0]
+    lines = reply_text.split("\n")
+    # Four lines: filename1, metadata1, filename2 (no metadata)
+    assert len(lines) == 3
+    assert lines[0].startswith("文件接收成功，已保存为:")
+    assert lines[1] == "2024-01-15 14:30:00  f/2.8  ISO 400"
+    assert lines[2].startswith("文件接收成功，已保存为:")

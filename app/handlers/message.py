@@ -14,6 +14,7 @@ import dingtalk_stream
 from dingtalk_stream import AckMessage, CallbackMessage, ChatbotMessage
 
 from app.services.command_matching import BaseCommandMatcher, normalize_command_text
+from app.services.media_metadata import extract_media_metadata
 from app.utils.file_storage import save_file
 
 
@@ -23,6 +24,7 @@ class _ImageProcessResult:
 
     status: str  # "saved" | "duplicate" | "failed" | "cancelled"
     detail: str  # saved filename for "saved", reply message for others
+    metadata: Optional[str] = None  # formatted metadata summary line, or None
 
 
 class BaseMessageHandler(ABC):
@@ -199,16 +201,27 @@ class CommandHandler(BaseMessageHandler):
 
         # Empty text skips the matcher entirely (no embedding inference in
         # semantic mode) and is simply treated as no match.
-        command_id = await self._matcher.match(normalized) if normalized else None
+        if normalized:
+            command_id = await self._matcher.match(normalized)
+        else:
+            self.logger.debug(
+                "Empty normalized text; skipping command matcher (has_picture=%s)",
+                has_picture,
+            )
+            command_id = None
 
         if command_id is not None:
             self.logger.info("Command matched: %s", command_id)
             await self._dispatch_table[command_id](message, raw_data, pipeline)
         elif not has_picture:
             # No command and no picture segment: guide the sender on how the
-            # bot can be used. Messages carrying pictures stay silent here;
-            # their save result is reported by the media flow instead.
+            # bot can be used.
+            self.logger.debug("Command unmatched; replying with guidance (text=%s)", normalized)
             await pipeline.async_reply_text(build_guide_reply(bool(normalized)), message)
+        else:
+            # Messages carrying pictures stay silent here; their save result
+            # is reported by the media flow instead.
+            self.logger.debug("Command unmatched; media message stays silent (text=%s)", normalized)
 
         # Commands do not halt the chain so a richText message can both run a
         # command and let MediaFileHandler archive its pictures.
@@ -315,11 +328,14 @@ class MediaFileHandler(BaseMessageHandler):
             return False
 
         result = await self._process_one_image(
-            download_code, original_filename, default_ext, message, raw_data
+            download_code, original_filename, default_ext, message, raw_data, msgtype
         )
 
         if result.status == "saved":
-            await pipeline.async_reply_text(f"文件接收成功，已保存为: {result.detail}", message)
+            reply = f"文件接收成功，已保存为: {result.detail}"
+            if result.metadata:
+                reply = f"{reply}\n{result.metadata}"
+            await pipeline.async_reply_text(reply, message)
         elif result.status == "cancelled":
             await pipeline.async_reply_text(result.detail, message)
         else:
@@ -333,6 +349,7 @@ class MediaFileHandler(BaseMessageHandler):
         default_ext: str,
         message: ChatbotMessage,
         raw_data: dict,
+        msgtype: str,
     ) -> _ImageProcessResult:
         """Download, dedupe, and save a single media file.
 
@@ -391,7 +408,12 @@ class MediaFileHandler(BaseMessageHandler):
             self.logger.info(
                 f"File saved: {saved_path} (sha256={download_result.sha256}, size={download_result.file_size})"
             )
-            return _ImageProcessResult("saved", saved_filename)
+
+            # Extract metadata for the reply (picture/video only); never
+            # raises — failures yield None and the reply stays filename-only.
+            metadata_line = extract_media_metadata(saved_path, msgtype)
+
+            return _ImageProcessResult("saved", saved_filename, metadata=metadata_line)
 
         except Exception as e:
             self.logger.error(f"Failed to process media file ({original_filename}): {e}", exc_info=True)
@@ -425,6 +447,7 @@ class MediaFileHandler(BaseMessageHandler):
                 default_ext=".png",
                 message=message,
                 raw_data=raw_data,
+                msgtype="picture",
             )
             results.append(result)
             if result.status == "cancelled":
@@ -433,7 +456,10 @@ class MediaFileHandler(BaseMessageHandler):
         reply_lines = []
         for result in results:
             if result.status == "saved":
-                reply_lines.append(f"文件接收成功，已保存为: {result.detail}")
+                line = f"文件接收成功，已保存为: {result.detail}"
+                if result.metadata:
+                    line = f"{line}\n{result.metadata}"
+                reply_lines.append(line)
             else:
                 reply_lines.append(result.detail)
 

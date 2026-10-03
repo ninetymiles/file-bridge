@@ -5,6 +5,7 @@ imports it only when SEMANTIC_COMMAND_ENABLED opts into the semantic backend.
 """
 
 import asyncio
+import logging
 import os
 from collections.abc import Mapping
 from pathlib import Path
@@ -14,6 +15,8 @@ from fastembed import TextEmbedding
 
 from .base import BaseCommandMatcher
 from .catalog import COMMAND_CATALOG
+
+logger = logging.getLogger("file-bridge.command")
 
 MODEL_NAME = "BAAI/bge-small-zh-v1.5"
 MATCH_THRESHOLD = 0.8
@@ -72,6 +75,16 @@ class SemanticCommandMatcher(BaseCommandMatcher):
         query_vector = self._embedder.embed([text])[0]
         scores = self._phrase_vectors @ query_vector
         best_index = int(np.argmax(scores))
-        if scores[best_index] >= self._threshold:
+        best_score = float(scores[best_index])
+        if best_score >= self._threshold:
             return self._phrases[best_index][0]
+        best_command_id, best_phrase = self._phrases[best_index]
+        logger.debug(
+            "Semantic match below threshold: text=%s, best=%s (%s, %.4f), threshold=%.2f",
+            text,
+            best_phrase,
+            best_command_id,
+            best_score,
+            self._threshold,
+        )
         return None
