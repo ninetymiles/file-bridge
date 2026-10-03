@@ -3,7 +3,7 @@
 import pytest
 from unittest.mock import MagicMock
 from dingtalk_stream import CallbackMessage, AckMessage, ChatbotMessage
-from app.handlers import BaseMessageHandler, PipelineHandler
+from app.handlers import BaseMessageHandler, PipelineHandler, ReplyIntent
 
 
 class MockHandler(BaseMessageHandler):
@@ -11,9 +11,9 @@ class MockHandler(BaseMessageHandler):
         self.should_handle = should_handle
         self.called = False
 
-    async def handle(self, message: ChatbotMessage, raw_data: dict, pipeline: PipelineHandler) -> bool:
+    async def handle(self, message: ChatbotMessage, raw_data: dict, pipeline: PipelineHandler) -> ReplyIntent | None:
         self.called = True
-        return self.should_handle
+        return None
 
 
 @pytest.mark.asyncio
@@ -35,7 +35,7 @@ async def test_pipeline_execution_order():
     assert msg == "OK"
     assert h1.called is True
     assert h2.called is True
-    assert h3.called is False  # halted after h2 handled it
+    assert h3.called is True  # no short-circuit in intent-reporting chain
 
 
 @pytest.mark.asyncio

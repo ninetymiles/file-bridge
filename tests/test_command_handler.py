@@ -3,7 +3,7 @@
 import pytest
 from unittest.mock import AsyncMock, MagicMock
 from dingtalk_stream import ChatbotMessage
-from app.handlers import CommandHandler, PipelineHandler
+from app.handlers import CommandHandler, PipelineHandler, ReplyTier
 from app.handlers.message import (
     CAPABILITY_VARIANTS,
     GUIDE_BODY_TEMPLATES,
@@ -27,7 +27,7 @@ class FakeMatcher:
 
 def _handler(command_id=None):
     matcher = FakeMatcher(command_id)
-    action = AsyncMock()
+    action = AsyncMock(return_value="命令执行结果")
     dispatch_table = {"rebuild_index": action}
     handler = CommandHandler(matcher=matcher, dispatch_table=dispatch_table)
     pipeline = MagicMock(spec=PipelineHandler)
@@ -35,8 +35,7 @@ def _handler(command_id=None):
     return handler, matcher, action, pipeline
 
 
-def _guide_reply(mock_pipeline) -> str:
-    return mock_pipeline.async_reply_text.await_args.args[0]
+
 
 
 @pytest.mark.asyncio
@@ -47,9 +46,11 @@ async def test_command_handler_dispatches_matched_command():
 
     handled = await handler.handle(msg, raw_data, pipeline)
 
-    assert handled is False
+    assert handled is not None
+    assert handled.tier == ReplyTier.PRIMARY
+    assert handled.text == "命令执行结果"
     assert matcher.received_texts == ["重建索引"]
-    action.assert_awaited_once_with(msg, raw_data, pipeline)
+    action.assert_awaited_once_with(msg, raw_data)
     pipeline.async_reply_text.assert_not_awaited()
 
 
@@ -61,7 +62,8 @@ async def test_command_handler_normalizes_text_before_matching():
 
     handled = await handler.handle(msg, raw_data, pipeline)
 
-    assert handled is False
+    assert handled is not None
+    assert handled.tier == ReplyTier.PRIMARY
     assert matcher.received_texts == ["重建索引"]
     action.assert_awaited_once()
 
@@ -74,12 +76,13 @@ async def test_command_handler_replies_unmatched_text_with_guide():
 
     handled = await handler.handle(msg, raw_data, pipeline)
 
-    assert handled is False
+    assert handled is not None
+    assert handled.tier == ReplyTier.SECONDARY
     assert matcher.received_texts == ["hello world"]
     action.assert_not_awaited()
-    pipeline.async_reply_text.assert_awaited_once()
+    pipeline.async_reply_text.assert_not_awaited()
 
-    reply = _guide_reply(pipeline)
+    reply = handled.text
     assert any(reply.startswith(prefix) for prefix in UNMATCHED_PREFIX_TEXTS)
     assert reply.endswith(tuple(GUIDE_ENDING_TEXTS))
 
@@ -92,14 +95,15 @@ async def test_command_handler_ignores_non_text():
 
     handled = await handler.handle(msg, raw_data, pipeline)
 
-    assert handled is False
+    assert handled is None
     assert matcher.received_texts == []
     action.assert_not_awaited()
     pipeline.async_reply_text.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_command_handler_skips_matcher_for_placeholder_only_richtext():
+async def test_command_handler_placeholder_only_richtext_returns_guide():
+    """richText with only picture placeholders returns SECONDARY guidance (empty prefix)."""
     handler, matcher, action, pipeline = _handler("rebuild_index")
     raw_data = {
         "msgtype": "richText",
@@ -109,7 +113,8 @@ async def test_command_handler_skips_matcher_for_placeholder_only_richtext():
 
     handled = await handler.handle(msg, raw_data, pipeline)
 
-    assert handled is False
+    assert handled is not None
+    assert handled.tier == ReplyTier.SECONDARY
     assert matcher.received_texts == []
     action.assert_not_awaited()
     pipeline.async_reply_text.assert_not_awaited()
@@ -132,14 +137,17 @@ async def test_command_handler_rich_text_dispatches_command():
 
     handled = await handler.handle(msg, raw_data, pipeline)
 
-    assert handled is False
+    assert handled is not None
+    assert handled.tier == ReplyTier.PRIMARY
+    assert handled.text == "命令执行结果"
     assert matcher.received_texts == ["重建索引"]
-    action.assert_awaited_once_with(msg, raw_data, pipeline)
+    action.assert_awaited_once_with(msg, raw_data)
     pipeline.async_reply_text.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_command_handler_rich_text_suppresses_guide_with_picture():
+async def test_command_handler_rich_text_unmatched_with_picture_returns_guide():
+    """Even if richText contains a picture, unmatched text still returns SECONDARY guidance."""
     handler, matcher, action, pipeline = _handler(None)
     raw_data = {
         "msgtype": "richText",
@@ -155,7 +163,8 @@ async def test_command_handler_rich_text_suppresses_guide_with_picture():
 
     handled = await handler.handle(msg, raw_data, pipeline)
 
-    assert handled is False
+    assert handled is not None
+    assert handled.tier == ReplyTier.SECONDARY
     assert matcher.received_texts == ["abcd"]
     action.assert_not_awaited()
     pipeline.async_reply_text.assert_not_awaited()
@@ -172,12 +181,13 @@ async def test_command_handler_empty_mention_gets_guide_without_prefix():
 
     handled = await handler.handle(msg, raw_data, pipeline)
 
-    assert handled is False
+    assert handled is not None
+    assert handled.tier == ReplyTier.SECONDARY
     assert matcher.received_texts == []
     action.assert_not_awaited()
-    pipeline.async_reply_text.assert_awaited_once()
+    pipeline.async_reply_text.assert_not_awaited()
 
-    reply = _guide_reply(pipeline)
+    reply = handled.text
     assert not any(prefix in reply for prefix in UNMATCHED_PREFIX_TEXTS)
     assert reply.endswith(tuple(GUIDE_ENDING_TEXTS))
     assert reply.count("• ") == len(CAPABILITY_VARIANTS)
@@ -199,12 +209,13 @@ async def test_command_handler_text_only_richtext_gets_guide():
 
     handled = await handler.handle(msg, raw_data, pipeline)
 
-    assert handled is False
+    assert handled is not None
+    assert handled.tier == ReplyTier.SECONDARY
     assert matcher.received_texts == ["abcd"]
     action.assert_not_awaited()
-    pipeline.async_reply_text.assert_awaited_once()
+    pipeline.async_reply_text.assert_not_awaited()
 
-    reply = _guide_reply(pipeline)
+    reply = handled.text
     assert any(reply.startswith(prefix) for prefix in UNMATCHED_PREFIX_TEXTS)
 
 

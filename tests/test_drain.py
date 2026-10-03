@@ -6,7 +6,7 @@ import pytest
 from dingtalk_stream import AckMessage, ChatbotMessage
 from unittest.mock import AsyncMock, MagicMock
 
-from app.handlers import BaseMessageHandler, PipelineHandler
+from app.handlers import BaseMessageHandler, PipelineHandler, ReplyIntent, ReplyTier
 
 
 def make_callback() -> "ChatbotMessage":
@@ -29,7 +29,7 @@ class DownloadingHandler(BaseMessageHandler):
         for task in list(self._interruptible_tasks):
             task.cancel()
 
-    async def handle(self, message, raw_data, pipeline) -> bool:
+    async def handle(self, message, raw_data, pipeline):
         async def download():
             self.download_started.set()
             await asyncio.sleep(3600)
@@ -40,11 +40,10 @@ class DownloadingHandler(BaseMessageHandler):
             await download_task
         except asyncio.CancelledError:
             self.replied_cancellation = True
-            await pipeline.async_reply_text("服务正在关闭，下载任务已取消", message)
-            return True
+            return ReplyIntent(tier=ReplyTier.PRIMARY, text="服务正在关闭，下载任务已取消")
         finally:
             self._interruptible_tasks.discard(download_task)
-        return True
+        return None
 
 
 class ArchivingHandler(BaseMessageHandler):
@@ -63,7 +62,7 @@ class ArchivingHandler(BaseMessageHandler):
         for task in list(self._interruptible_tasks):
             task.cancel()
 
-    async def handle(self, message, raw_data, pipeline) -> bool:
+    async def handle(self, message, raw_data, pipeline):
         async def download():
             return "done"
 
@@ -77,7 +76,7 @@ class ArchivingHandler(BaseMessageHandler):
         # Archive: non-interruptible, must finish regardless of drain.
         await asyncio.sleep(self.archive_delay)
         self.archive_finished = True
-        return True
+        return None
 
 
 class MarkingHandler(BaseMessageHandler):
@@ -86,10 +85,10 @@ class MarkingHandler(BaseMessageHandler):
     def __init__(self):
         self.was_registered = None
 
-    async def handle(self, message, raw_data, pipeline) -> bool:
+    async def handle(self, message, raw_data, pipeline):
         task = asyncio.current_task()
         self.was_registered = task in pipeline._active_tasks
-        return True
+        return None
 
 
 @pytest.mark.asyncio
@@ -202,9 +201,9 @@ async def test_drain_timeout_abandons_stuck_task():
     """
 
     class StuckHandler(BaseMessageHandler):
-        async def handle(self, message, raw_data, pipeline) -> bool:
+        async def handle(self, message, raw_data, pipeline):
             await asyncio.sleep(3600)
-            return True
+            return None
 
     pipeline = PipelineHandler([StuckHandler()])
 

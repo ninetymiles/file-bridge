@@ -5,6 +5,8 @@ from app.handlers.message import (
     CommandHandler,
     MediaFileHandler,
     PipelineHandler,
+    ReplyIntent,
+    ReplyTier,
 )
 
 __all__ = [
@@ -12,4 +14,6 @@ __all__ = [
     "PipelineHandler",
     "CommandHandler",
     "MediaFileHandler",
+    "ReplyIntent",
+    "ReplyTier",
 ]

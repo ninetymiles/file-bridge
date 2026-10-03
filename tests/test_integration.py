@@ -133,9 +133,109 @@ async def test_end_to_end_file_and_rebuild_index_pipeline(tmp_path):
 
     status, msg = await pipeline.process(cb_msg4)
     assert status == AckMessage.STATUS_OK
-    # Two replies: CommandHandler (index rebuild) first, then MediaFileHandler (image saved)
-    assert len(replies) == 5
+    # One merged reply: PRIMARY tier wins, command result + image save result merged
+    assert len(replies) == 4
     assert "索引重建完成" in replies[3][0]
-    assert "文件接收成功，已保存为:" in replies[4][0]
+    assert "文件接收成功，已保存为:" in replies[3][0]
+
+    # 6. Single-chat text unmatched: only one SECONDARY guidance reply
+    cb_msg5 = CallbackMessage()
+    cb_msg5.data = {
+        "msgtype": "text",
+        "senderNick": "Tester",
+        "senderId": "user_100",
+        "sessionWebhook": "https://webhook.mock",
+        "text": {"content": "hello world"},
+    }
+
+    status, msg = await pipeline.process(cb_msg5)
+    assert status == AckMessage.STATUS_OK
+    assert len(replies) == 5
+    # Guidance reply contains a capability list shell and bullet points
+    assert "• " in replies[4][0] and "保存" in replies[4][0]
+
+    # 7. richText with picture but no command: only media save result, no guidance
+    cb_msg6 = CallbackMessage()
+    cb_msg6.data = {
+        "msgtype": "richText",
+        "senderNick": "Tester",
+        "senderId": "user_100",
+        "sessionWebhook": "https://webhook.mock",
+        "content": {
+            "richText": [
+                {"text": "@FileBridge"},
+                {"text": "abcd"},
+                {"type": "picture", "downloadCode": "code_rich_2"},
+            ]
+        },
+    }
+
+    status, msg = await pipeline.process(cb_msg6)
+    assert status == AckMessage.STATUS_OK
+    assert len(replies) == 6
+    assert "文件已存在，请勿重复发送" in replies[5][0] or "文件接收成功，已保存为:" in replies[5][0]
+    assert "我可以帮您" not in replies[5][0]
+
+    # 8. Single-chat audio: explicit unsupported reply
+    cb_msg7 = CallbackMessage()
+    cb_msg7.data = {
+        "msgtype": "audio",
+        "senderNick": "Tester",
+        "senderId": "user_100",
+        "sessionWebhook": "https://webhook.mock",
+        "conversationType": "1",
+        "content": {"downloadCode": "code_audio", "duration": 1000},
+    }
+
+    status, msg = await pipeline.process(cb_msg7)
+    assert status == AckMessage.STATUS_OK
+    assert len(replies) == 7
+    assert "语音消息" in replies[6][0] and "不支持" in replies[6][0]
+
+    # 9. Single-chat unknown type: explicit unsupported reply
+    cb_msg8 = CallbackMessage()
+    cb_msg8.data = {
+        "msgtype": "sticker",
+        "senderNick": "Tester",
+        "senderId": "user_100",
+        "sessionWebhook": "https://webhook.mock",
+        "conversationType": "1",
+    }
+
+    status, msg = await pipeline.process(cb_msg8)
+    assert status == AckMessage.STATUS_OK
+    assert len(replies) == 8
+    assert "不支持" in replies[7][0]
+
+    # 10. Single-chat picture without downloadCode: unsupported reply
+    cb_msg9 = CallbackMessage()
+    cb_msg9.data = {
+        "msgtype": "picture",
+        "senderNick": "Tester",
+        "senderId": "user_100",
+        "sessionWebhook": "https://webhook.mock",
+        "conversationType": "1",
+        "content": {},
+    }
+
+    status, msg = await pipeline.process(cb_msg9)
+    assert status == AckMessage.STATUS_OK
+    assert len(replies) == 9
+    assert "不支持" in replies[8][0]
+
+    # 11. Group message with no intents: silent ACK (audio in group)
+    cb_msg10 = CallbackMessage()
+    cb_msg10.data = {
+        "msgtype": "audio",
+        "senderNick": "Tester",
+        "senderId": "user_100",
+        "sessionWebhook": "https://webhook.mock",
+        "conversationType": "2",
+        "content": {"downloadCode": "code_audio"},
+    }
+
+    status, msg = await pipeline.process(cb_msg10)
+    assert status == AckMessage.STATUS_OK
+    assert len(replies) == 9  # no new reply
 
     await http_client.aclose()

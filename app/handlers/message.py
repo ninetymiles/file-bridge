@@ -9,6 +9,7 @@ import re
 from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from enum import IntEnum
 from typing import List, Optional, Tuple
 import dingtalk_stream
 from dingtalk_stream import AckMessage, CallbackMessage, ChatbotMessage
@@ -27,6 +28,25 @@ class _ImageProcessResult:
     metadata: Optional[str] = None  # formatted metadata summary line, or None
 
 
+class ReplyTier(IntEnum):
+    """Reply delivery priority. Smaller value = higher priority.
+
+    Generic priority semantics only; no coupling to content types.
+    Gaps between values allow future tier insertion without renumbering.
+    """
+
+    PRIMARY = 100
+    SECONDARY = 200
+
+
+@dataclass(frozen=True)
+class ReplyIntent:
+    """Intent to send a reply, produced by a message handler."""
+
+    tier: ReplyTier
+    text: str
+
+
 class BaseMessageHandler(ABC):
     """Abstract base class for message handlers."""
 
@@ -36,8 +56,9 @@ class BaseMessageHandler(ABC):
         message: ChatbotMessage,
         raw_data: dict,
         pipeline: "PipelineHandler",
-    ) -> bool:
-        """Handle incoming message. Return True if handled (halting pipeline), False otherwise."""
+    ) -> Optional[ReplyIntent]:
+        """Handle incoming message. Return a ReplyIntent if the message is
+        within this handler's responsibility, or None to stay silent."""
         pass
 
     def cancel_tasks(self) -> None:
@@ -51,7 +72,7 @@ class BaseMessageHandler(ABC):
         return None
 
 
-CommandAction = Callable[[ChatbotMessage, dict, "PipelineHandler"], Awaitable[None]]
+CommandAction = Callable[[ChatbotMessage, dict], Awaitable[str]]
 
 # Guidance replies for text messages that match no command. The reply is
 # composed from three orthogonal dimensions, each picked at random; all
@@ -179,11 +200,10 @@ class CommandHandler(BaseMessageHandler):
         message: ChatbotMessage,
         raw_data: dict,
         pipeline: "PipelineHandler",
-    ) -> bool:
+    ) -> Optional[ReplyIntent]:
         """Match and execute command messages like '重建索引'."""
         msgtype = message.message_type or raw_data.get("msgtype")
 
-        has_picture = False
         if msgtype == "text":
             content = ""
             if message.text and message.text.content:
@@ -192,10 +212,10 @@ class CommandHandler(BaseMessageHandler):
                 content = raw_data["text"].get("content", "")
         elif msgtype == "richText":
             segments = (raw_data.get("content") or {}).get("richText") or []
-            content, has_picture = self._merge_rich_text(segments)
+            content, _ = self._merge_rich_text(segments)
             self.logger.debug("RichText merged text: %s", content)
         else:
-            return False
+            return None
 
         normalized = normalize_command_text(content)
 
@@ -204,28 +224,16 @@ class CommandHandler(BaseMessageHandler):
         if normalized:
             command_id = await self._matcher.match(normalized)
         else:
-            self.logger.debug(
-                "Empty normalized text; skipping command matcher (has_picture=%s)",
-                has_picture,
-            )
+            self.logger.debug("Empty normalized text; skipping command matcher")
             command_id = None
 
         if command_id is not None:
             self.logger.info("Command matched: %s", command_id)
-            await self._dispatch_table[command_id](message, raw_data, pipeline)
-        elif not has_picture:
-            # No command and no picture segment: guide the sender on how the
-            # bot can be used.
-            self.logger.debug("Command unmatched; replying with guidance (text=%s)", normalized)
-            await pipeline.async_reply_text(build_guide_reply(bool(normalized)), message)
-        else:
-            # Messages carrying pictures stay silent here; their save result
-            # is reported by the media flow instead.
-            self.logger.debug("Command unmatched; media message stays silent (text=%s)", normalized)
+            result_text = await self._dispatch_table[command_id](message, raw_data)
+            return ReplyIntent(tier=ReplyTier.PRIMARY, text=result_text)
 
-        # Commands do not halt the chain so a richText message can both run a
-        # command and let MediaFileHandler archive its pictures.
-        return False
+        self.logger.debug("Command unmatched; replying with guidance (text=%s)", normalized)
+        return ReplyIntent(tier=ReplyTier.SECONDARY, text=build_guide_reply(bool(normalized)))
 
     @staticmethod
     def _merge_rich_text(segments) -> tuple[str, bool]:
@@ -286,17 +294,11 @@ class MediaFileHandler(BaseMessageHandler):
         message: ChatbotMessage,
         raw_data: dict,
         pipeline: "PipelineHandler",
-    ) -> bool:
+    ) -> Optional[ReplyIntent]:
         """Handle picture, video, file, and richText messages."""
         msgtype = message.message_type or raw_data.get("msgtype")
         if msgtype not in self.SUPPORTED_MSG_TYPES:
-            # Only single chat can deliver such frames (groups never get
-            # file/video/audio): tell the sender clearly instead of silence.
-            conversation_type = message.conversation_type or raw_data.get("conversationType")
-            if conversation_type == "1":
-                reply = UNSUPPORTED_AUDIO_TEXT if msgtype == "audio" else UNSUPPORTED_TYPE_TEXT
-                await pipeline.async_reply_text(reply, message)
-            return False
+            return None
 
         content = raw_data.get("content") or {}
 
@@ -325,7 +327,7 @@ class MediaFileHandler(BaseMessageHandler):
 
         if not download_code:
             self.logger.warning(f"No downloadCode found in {msgtype} message")
-            return False
+            return None
 
         result = await self._process_one_image(
             download_code, original_filename, default_ext, message, raw_data, msgtype
@@ -335,12 +337,11 @@ class MediaFileHandler(BaseMessageHandler):
             reply = f"文件接收成功，已保存为: {result.detail}"
             if result.metadata:
                 reply = f"{reply}\n{result.metadata}"
-            await pipeline.async_reply_text(reply, message)
+            return ReplyIntent(tier=ReplyTier.PRIMARY, text=reply)
         elif result.status == "cancelled":
-            await pipeline.async_reply_text(result.detail, message)
+            return ReplyIntent(tier=ReplyTier.PRIMARY, text=result.detail)
         else:
-            await pipeline.async_reply_text(result.detail, message)
-        return False
+            return ReplyIntent(tier=ReplyTier.PRIMARY, text=result.detail)
 
     async def _process_one_image(
         self,
@@ -430,13 +431,13 @@ class MediaFileHandler(BaseMessageHandler):
         raw_data: dict,
         pipeline: "PipelineHandler",
         content: dict,
-    ) -> bool:
+    ) -> Optional[ReplyIntent]:
         """Handle richText messages: extract picture segments, save each, reply consolidated."""
         segments = content.get("richText") or []
         picture_segments = [seg for seg in segments if isinstance(seg, dict) and "downloadCode" in seg]
 
         if not picture_segments:
-            return False
+            return None
 
         results: List[_ImageProcessResult] = []
         for index, seg in enumerate(picture_segments, start=1):
@@ -463,8 +464,7 @@ class MediaFileHandler(BaseMessageHandler):
             else:
                 reply_lines.append(result.detail)
 
-        await pipeline.async_reply_text("\n".join(reply_lines), message)
-        return False
+        return ReplyIntent(tier=ReplyTier.PRIMARY, text="\n".join(reply_lines))
 
     async def _download_phase(self, download_code: str):
         """Resolve download URL and stream the file to a temp path.
@@ -651,17 +651,31 @@ class PipelineHandler(dingtalk_stream.ChatbotHandler):
         )
         self.logger.debug("Message raw data: %s", json.dumps(raw_data, ensure_ascii=False, indent=2, default=str))
 
+        intents: List[ReplyIntent] = []
         for handler in self.handlers:
             try:
-                handled = await handler.handle(incoming_message, raw_data, self)
-                if handled:
-                    self.logger.debug(f"Message handled by {handler.__class__.__name__}")
-                    return AckMessage.STATUS_OK, "OK"
+                intent = await handler.handle(incoming_message, raw_data, self)
             except Exception as e:
                 self.logger.error(
                     f"Error in handler {handler.__class__.__name__}: {e}",
                     exc_info=True,
                 )
-                return AckMessage.STATUS_OK, "OK"
+                continue
+            if intent is not None:
+                intents.append(intent)
+
+        if intents:
+            highest_tier = min(intent.tier for intent in intents)
+            merged = "\n".join(
+                intent.text for intent in intents if intent.tier == highest_tier
+            )
+            await self.async_reply_text(merged, incoming_message)
+        else:
+            conversation_type = incoming_message.conversation_type or raw_data.get("conversationType")
+            if conversation_type == "1":
+                msgtype = incoming_message.message_type or raw_data.get("msgtype")
+                reply = UNSUPPORTED_AUDIO_TEXT if msgtype == "audio" else UNSUPPORTED_TYPE_TEXT
+                await self.async_reply_text(reply, incoming_message)
+            # Group messages with no intents stay silent (ACK only).
 
         return AckMessage.STATUS_OK, "OK"

@@ -129,11 +129,10 @@ def create_pipeline(
 
     command_logger = logger if logger is not None else logging.getLogger("file-bridge")
 
-    async def rebuild_index(message, raw_data, pipeline) -> None:
+    async def rebuild_index(message, raw_data) -> str:
         command_logger.info("Received rebuild index command")
         cleaned, remaining = await metadata_store.async_rebuild_index()
-        response_text = f"索引重建完成，清理元数据 {cleaned} 条，现有有效索引 {remaining} 条。"
-        await pipeline.async_reply_text(response_text, message)
+        return f"索引重建完成，清理元数据 {cleaned} 条，现有有效索引 {remaining} 条。"
 
     dispatch_table = {REBUILD_INDEX: rebuild_index}
 

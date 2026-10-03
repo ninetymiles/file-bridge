@@ -4,8 +4,7 @@ import os
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 from dingtalk_stream import ChatbotMessage
-from app.handlers import MediaFileHandler, PipelineHandler
-from app.handlers.message import UNSUPPORTED_AUDIO_TEXT, UNSUPPORTED_TYPE_TEXT
+from app.handlers import MediaFileHandler, PipelineHandler, ReplyTier
 from app.services.file_downloader import DownloadResult
 
 
@@ -57,8 +56,9 @@ async def test_media_file_handler_new_file(tmp_path):
     }
     msg = ChatbotMessage.from_dict(raw_data)
 
-    handled = await handler.handle(msg, raw_data, mock_pipeline)
-    assert handled is False
+    intent = await handler.handle(msg, raw_data, mock_pipeline)
+    assert intent is not None
+    assert intent.tier == ReplyTier.PRIMARY
 
     mock_downloader.get_download_url.assert_called_once_with("code_123")
     mock_downloader.download_file_stream.assert_called_once_with("https://example.com/dl")
@@ -68,10 +68,9 @@ async def test_media_file_handler_new_file(tmp_path):
     assert os.path.exists(saved_path_arg)
 
     # Verify reply
-    mock_pipeline.async_reply_text.assert_called_once()
-    reply_text = mock_pipeline.async_reply_text.call_args[0][0]
-    assert "文件接收成功，已保存为:" in reply_text
-    assert ".pdf" in reply_text
+    mock_pipeline.async_reply_text.assert_not_called()
+    assert "文件接收成功，已保存为:" in intent.text
+    assert ".pdf" in intent.text
 
 
 @pytest.mark.asyncio
@@ -113,15 +112,16 @@ async def test_media_file_handler_duplicate_file(tmp_path):
     }
     msg = ChatbotMessage.from_dict(raw_data)
 
-    handled = await handler.handle(msg, raw_data, mock_pipeline)
-    assert handled is False
+    intent = await handler.handle(msg, raw_data, mock_pipeline)
+    assert intent is not None
+    assert intent.tier == ReplyTier.PRIMARY
 
     # Temp file should be deleted
     assert not os.path.exists(str(temp_file))
     # No insert
     mock_store.async_insert_record.assert_not_called()
-    # Replied with duplicate notice
-    mock_pipeline.async_reply_text.assert_called_once_with("文件已存在，请勿重复发送", msg)
+    mock_pipeline.async_reply_text.assert_not_called()
+    assert intent.text == "文件已存在，请勿重复发送"
 
 
 @pytest.mark.asyncio
@@ -164,11 +164,12 @@ async def test_media_file_handler_video(tmp_path):
     }
     msg = ChatbotMessage.from_dict(raw_data)
 
-    handled = await handler.handle(msg, raw_data, mock_pipeline)
-    assert handled is False
+    intent = await handler.handle(msg, raw_data, mock_pipeline)
+    assert intent is not None
+    assert intent.tier == ReplyTier.PRIMARY
     mock_store.async_insert_record.assert_called_once()
-    reply_text = mock_pipeline.async_reply_text.call_args[0][0]
-    assert ".mp4" in reply_text
+    mock_pipeline.async_reply_text.assert_not_called()
+    assert ".mp4" in intent.text
 
 
 @pytest.mark.asyncio
@@ -207,13 +208,13 @@ async def test_rich_text_single_image(tmp_path):
     }
     msg = ChatbotMessage.from_dict(raw_data)
 
-    handled = await handler.handle(msg, raw_data, mock_pipeline)
-    assert handled is False
+    intent = await handler.handle(msg, raw_data, mock_pipeline)
+    assert intent is not None
+    assert intent.tier == ReplyTier.PRIMARY
 
     mock_store.async_insert_record.assert_called_once()
-    mock_pipeline.async_reply_text.assert_called_once()
-    reply_text = mock_pipeline.async_reply_text.call_args[0][0]
-    assert "文件接收成功，已保存为:" in reply_text
+    mock_pipeline.async_reply_text.assert_not_called()
+    assert "文件接收成功，已保存为:" in intent.text
 
 
 @pytest.mark.asyncio
@@ -257,13 +258,13 @@ async def test_rich_text_multiple_images(tmp_path):
     }
     msg = ChatbotMessage.from_dict(raw_data)
 
-    handled = await handler.handle(msg, raw_data, mock_pipeline)
-    assert handled is False
+    intent = await handler.handle(msg, raw_data, mock_pipeline)
+    assert intent is not None
+    assert intent.tier == ReplyTier.PRIMARY
 
     assert mock_store.async_insert_record.call_count == 2
-    mock_pipeline.async_reply_text.assert_called_once()
-    reply_text = mock_pipeline.async_reply_text.call_args[0][0]
-    lines = reply_text.split("\n")
+    mock_pipeline.async_reply_text.assert_not_called()
+    lines = intent.text.split("\n")
     assert len(lines) == 2
     assert all("文件接收成功，已保存为:" in line for line in lines)
 
@@ -307,12 +308,12 @@ async def test_rich_text_with_duplicate(tmp_path):
     }
     msg = ChatbotMessage.from_dict(raw_data)
 
-    handled = await handler.handle(msg, raw_data, mock_pipeline)
-    assert handled is False
+    intent = await handler.handle(msg, raw_data, mock_pipeline)
+    assert intent is not None
+    assert intent.tier == ReplyTier.PRIMARY
 
-    mock_pipeline.async_reply_text.assert_called_once()
-    reply_text = mock_pipeline.async_reply_text.call_args[0][0]
-    lines = reply_text.split("\n")
+    mock_pipeline.async_reply_text.assert_not_called()
+    lines = intent.text.split("\n")
     assert "文件已存在，请勿重复发送" in lines[0]
     assert "文件接收成功，已保存为:" in lines[1]
 
@@ -337,8 +338,8 @@ async def test_rich_text_no_picture_segments():
     }
     msg = ChatbotMessage.from_dict(raw_data)
 
-    handled = await handler.handle(msg, raw_data, mock_pipeline)
-    assert handled is False
+    intent = await handler.handle(msg, raw_data, mock_pipeline)
+    assert intent is None
     mock_pipeline.async_reply_text.assert_not_called()
     mock_downloader.get_download_url.assert_not_called()
 
@@ -379,20 +380,21 @@ async def test_rich_text_partial_failure(tmp_path):
     }
     msg = ChatbotMessage.from_dict(raw_data)
 
-    handled = await handler.handle(msg, raw_data, mock_pipeline)
-    assert handled is False
+    intent = await handler.handle(msg, raw_data, mock_pipeline)
+    assert intent is not None
+    assert intent.tier == ReplyTier.PRIMARY
 
     # Second image still saved despite first failure
     mock_store.async_insert_record.assert_called_once()
-    mock_pipeline.async_reply_text.assert_called_once()
-    reply_text = mock_pipeline.async_reply_text.call_args[0][0]
-    lines = reply_text.split("\n")
+    mock_pipeline.async_reply_text.assert_not_called()
+    lines = intent.text.split("\n")
     assert "文件接收处理失败，请稍后重试" in lines[0]
     assert "文件接收成功，已保存为:" in lines[1]
 
 
 @pytest.mark.asyncio
-async def test_media_file_handler_single_chat_audio_rejected():
+async def test_media_file_handler_single_chat_audio_returns_none():
+    """audio is not a media type; handler returns None (dispatcher handles fallback)."""
     handler = _unsupported_type_handler()
     mock_pipeline = MagicMock(spec=PipelineHandler)
     mock_pipeline.async_reply_text = AsyncMock()
@@ -404,14 +406,14 @@ async def test_media_file_handler_single_chat_audio_rejected():
     }
     msg = ChatbotMessage.from_dict(raw_data)
 
-    handled = await handler.handle(msg, raw_data, mock_pipeline)
+    intent = await handler.handle(msg, raw_data, mock_pipeline)
 
-    assert handled is False
-    mock_pipeline.async_reply_text.assert_awaited_once_with(UNSUPPORTED_AUDIO_TEXT, msg)
+    assert intent is None
+    mock_pipeline.async_reply_text.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_media_file_handler_single_chat_unknown_type_rejected():
+async def test_media_file_handler_unknown_type_returns_none():
     handler = _unsupported_type_handler()
     mock_pipeline = MagicMock(spec=PipelineHandler)
     mock_pipeline.async_reply_text = AsyncMock()
@@ -419,10 +421,10 @@ async def test_media_file_handler_single_chat_unknown_type_rejected():
     raw_data = {"msgtype": "sticker", "conversationType": "1"}
     msg = ChatbotMessage.from_dict(raw_data)
 
-    handled = await handler.handle(msg, raw_data, mock_pipeline)
+    intent = await handler.handle(msg, raw_data, mock_pipeline)
 
-    assert handled is False
-    mock_pipeline.async_reply_text.assert_awaited_once_with(UNSUPPORTED_TYPE_TEXT, msg)
+    assert intent is None
+    mock_pipeline.async_reply_text.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -438,9 +440,9 @@ async def test_media_file_handler_group_unknown_type_stays_silent():
     }
     msg = ChatbotMessage.from_dict(raw_data)
 
-    handled = await handler.handle(msg, raw_data, mock_pipeline)
+    intent = await handler.handle(msg, raw_data, mock_pipeline)
 
-    assert handled is False
+    assert intent is None
     mock_pipeline.async_reply_text.assert_not_awaited()
 
 
@@ -473,10 +475,10 @@ async def test_single_media_reply_includes_metadata_line(tmp_path):
     msg = ChatbotMessage.from_dict(raw_data)
 
     with patch("app.handlers.message.extract_media_metadata", return_value="544x960  30.2fps"):
-        await handler.handle(msg, raw_data, mock_pipeline)
+        intent = await handler.handle(msg, raw_data, mock_pipeline)
 
-    reply_text = mock_pipeline.async_reply_text.call_args[0][0]
-    lines = reply_text.split("\n")
+    mock_pipeline.async_reply_text.assert_not_called()
+    lines = intent.text.split("\n")
     assert lines[0].startswith("文件接收成功，已保存为:")
     assert lines[1] == "544x960  30.2fps"
 
@@ -510,11 +512,11 @@ async def test_single_media_reply_no_metadata_stays_filename_only(tmp_path):
     msg = ChatbotMessage.from_dict(raw_data)
 
     with patch("app.handlers.message.extract_media_metadata", return_value=None):
-        await handler.handle(msg, raw_data, mock_pipeline)
+        intent = await handler.handle(msg, raw_data, mock_pipeline)
 
-    reply_text = mock_pipeline.async_reply_text.call_args[0][0]
-    assert reply_text.startswith("文件接收成功，已保存为:")
-    assert "\n" not in reply_text  # no metadata line appended
+    mock_pipeline.async_reply_text.assert_not_called()
+    assert intent.text.startswith("文件接收成功，已保存为:")
+    assert "\n" not in intent.text  # no metadata line appended
 
 
 @pytest.mark.asyncio
@@ -558,11 +560,11 @@ async def test_rich_text_reply_appends_per_image_metadata(tmp_path):
         "app.handlers.message.extract_media_metadata",
         side_effect=["2024-01-15 14:30:00  f/2.8  ISO 400", None],
     ):
-        await handler.handle(msg, raw_data, mock_pipeline)
+        intent = await handler.handle(msg, raw_data, mock_pipeline)
 
-    reply_text = mock_pipeline.async_reply_text.call_args[0][0]
-    lines = reply_text.split("\n")
-    # Four lines: filename1, metadata1, filename2 (no metadata)
+    mock_pipeline.async_reply_text.assert_not_called()
+    lines = intent.text.split("\n")
+    # Three lines: filename1, metadata1, filename2 (no metadata)
     assert len(lines) == 3
     assert lines[0].startswith("文件接收成功，已保存为:")
     assert lines[1] == "2024-01-15 14:30:00  f/2.8  ISO 400"
