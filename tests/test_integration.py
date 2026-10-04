@@ -9,6 +9,7 @@ from dingtalk_stream import CallbackMessage, AckMessage
 from app.main import create_pipeline
 from app.services.command_matching import SubstringCommandMatcher
 from app.services.metadata_store import MetadataStore
+from app.handlers.message import CAPABILITY_VARIANTS
 
 
 @pytest.mark.asyncio
@@ -151,8 +152,12 @@ async def test_end_to_end_file_and_rebuild_index_pipeline(tmp_path):
     status, msg = await pipeline.process(cb_msg5)
     assert status == AckMessage.STATUS_OK
     assert len(replies) == 5
-    # Guidance reply contains a capability list shell and bullet points
-    assert "• " in replies[4][0] and "保存" in replies[4][0]
+    # Guidance reply contract: a single message whose capability list has
+    # exactly four bullets. Wording variants are randomized by build_guide_reply
+    # and covered deterministically in test_command_handler, so this integration
+    # assertion must not pin any specific variant's literal text.
+    guide = replies[4][0]
+    assert guide.count("• ") == len(CAPABILITY_VARIANTS)
 
     # 7. richText with picture but no command: only media save result, no guidance
     cb_msg6 = CallbackMessage()
