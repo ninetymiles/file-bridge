@@ -11,5 +11,17 @@ COMMAND_CATALOG: dict[str, tuple[str, ...]] = {
         "重新建立索引",
         "重建文件索引",
         "rebuild index",
+        # Consistency-check phrasings: the command verifies indexed records
+        # against on-disk files and purges missing ones. Phrases must match
+        # that verify/sync intent; "generate"-style phrases (生成索引) are
+        # excluded because the command never scans disk to backfill files.
+        "检查索引",
+        "校验索引",
+        "检查文件索引",
+        "同步索引",
+        "同步文件索引",
+        "刷新索引",
+        "刷新文件索引",
+        "更新索引",
     ),
 }

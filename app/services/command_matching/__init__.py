@@ -1,9 +1,8 @@
 """Command matcher backends and the startup selection factory."""
 
 import logging
-import os
 
-from .base import BaseCommandMatcher, normalize_command_text
+from .base import BaseCommandMatcher, is_inquiry_text, normalize_command_text
 from .catalog import COMMAND_CATALOG, REBUILD_INDEX
 from .substring import SubstringCommandMatcher
 
@@ -12,7 +11,9 @@ __all__ = [
     "COMMAND_CATALOG",
     "REBUILD_INDEX",
     "SubstringCommandMatcher",
+    "is_inquiry_text",
     "normalize_command_text",
+    "parse_enabled",
     "build_command_matcher",
 ]
 
@@ -20,9 +21,13 @@ logger = logging.getLogger("file-bridge")
 _ENABLED_VALUES = frozenset({"true", "1"})
 
 
-def build_command_matcher() -> BaseCommandMatcher:
-    """Select the command backend from SEMANTIC_COMMAND_ENABLED at startup."""
-    enabled = os.getenv("SEMANTIC_COMMAND_ENABLED", "").strip().lower() in _ENABLED_VALUES
+def parse_enabled(raw: str | None) -> bool:
+    """Interpret a boolean-ish opt-in value (case-insensitive true/1)."""
+    return raw is not None and raw.strip().lower() in _ENABLED_VALUES
+
+
+def build_command_matcher(enabled: bool) -> BaseCommandMatcher:
+    """Select the command backend from an explicit startup flag."""
     if not enabled:
         logger.info("Command matcher initialized: substring")
         return SubstringCommandMatcher()

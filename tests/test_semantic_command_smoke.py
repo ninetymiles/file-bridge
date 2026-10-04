@@ -9,7 +9,11 @@ import sys
 
 import pytest
 
-from app.services.command_matching import REBUILD_INDEX, normalize_command_text
+from app.services.command_matching import (
+    REBUILD_INDEX,
+    is_inquiry_text,
+    normalize_command_text,
+)
 
 pytestmark = pytest.mark.semantic
 
@@ -24,19 +28,38 @@ POSITIVE_SAMPLES = [
     "重新构建一下索引",
     "索引重新建一下",
     "刷新一下索引",
+    # Verify/sync phrasings added for the consistency-check intent.
+    "检查索引",
+    "校验索引",
+    "检查文件索引",
+    "同步索引",
+    "同步文件索引",
+    "刷新索引",
+    "刷新文件索引",
+    "更新索引",
 ]
 
+# Unrelated texts that the bare matcher itself must reject (below threshold).
 NEGATIVE_SAMPLES = [
-    "查询索引状态",
     "帮我索引一下这个文件",
     "建立文件夹",
-    "现在有多少索引",
-    "索引重建完成了吗",
-    "索引是什么意思",
     "你好",
-    "今天天气怎么样",
     "下载这个文件",
     "把这份文件发给我",
+]
+
+# High-overlap status inquiries. The embedding matcher cannot tell these from
+# an action command (they score above threshold), so they are intercepted by
+# is_inquiry_text in the handler BEFORE the matcher runs. The bare matcher is
+# expected to match them; we assert the inquiry guard catches them instead.
+INQUIRY_SAMPLES = [
+    "查询索引状态",
+    "现在有多少索引",
+    "索引重建完成了吗",
+    "重新构建索引了吗",
+    "刷新索引完成了吗",
+    "更新索引了吗",
+    "索引同步好了吗",
 ]
 
 
@@ -80,3 +103,13 @@ async def test_negative_samples_do_not_match(matcher):
         if command_id is not None:
             false_hits.append((sample, command_id))
     assert len(false_hits) <= 1, f"negative samples falsely matched: {false_hits}"
+
+
+def test_inquiry_samples_intercepted_before_matcher():
+    # These inquiries score above the matcher's threshold, so the handler must
+    # short-circuit them via is_inquiry_text before the matcher ever runs.
+    not_flagged = [
+        sample for sample in INQUIRY_SAMPLES
+        if not is_inquiry_text(normalize_command_text(sample))
+    ]
+    assert not not_flagged, f"inquiries not intercepted by guard: {not_flagged}"

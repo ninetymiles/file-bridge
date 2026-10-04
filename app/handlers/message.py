@@ -14,7 +14,11 @@ from typing import List, Optional, Tuple
 import dingtalk_stream
 from dingtalk_stream import AckMessage, CallbackMessage, ChatbotMessage
 
-from app.services.command_matching import BaseCommandMatcher, normalize_command_text
+from app.services.command_matching import (
+    BaseCommandMatcher,
+    is_inquiry_text,
+    normalize_command_text,
+)
 from app.services.media_metadata import extract_media_metadata
 from app.utils.file_storage import save_file
 
@@ -219,13 +223,16 @@ class CommandHandler(BaseMessageHandler):
 
         normalized = normalize_command_text(content)
 
-        # Empty text skips the matcher entirely (no embedding inference in
-        # semantic mode) and is simply treated as no match.
-        if normalized:
-            command_id = await self._matcher.match(normalized)
-        else:
+        # Empty or inquiry text skips the matcher entirely (no embedding
+        # inference in semantic mode) and is simply treated as no match.
+        if not normalized:
             self.logger.debug("Empty normalized text; skipping command matcher")
             command_id = None
+        elif is_inquiry_text(normalized):
+            self.logger.debug("Inquiry text; skipping command matcher: %s", normalized)
+            command_id = None
+        else:
+            command_id = await self._matcher.match(normalized)
 
         if command_id is not None:
             self.logger.info("Command matched: %s", command_id)

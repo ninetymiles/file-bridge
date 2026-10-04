@@ -7,7 +7,11 @@ from typing import List, Optional
 import dingtalk_stream
 import dotenv
 
-from app.services.command_matching import REBUILD_INDEX, build_command_matcher
+from app.services.command_matching import (
+    REBUILD_INDEX,
+    build_command_matcher,
+    parse_enabled,
+)
 from app.services.metadata_store import MetadataStore
 from app.services.file_downloader import FileDownloader
 from app.services.lifecycle_notifier import LifecycleNotifier
@@ -17,8 +21,6 @@ from app.handlers import (
     CommandHandler,
     MediaFileHandler,
 )
-
-dotenv.load_dotenv()
 
 DEFAULT_OUTPUT_DIR = "./output"
 DEFAULT_LOG_LEVEL = "INFO"
@@ -102,6 +104,11 @@ def parse_config(args: Optional[List[str]] = None) -> argparse.Namespace:
     # LOG_LEVEL is env-only (no CLI flag), read verbatim; validation and
     # fallback to INFO happen in resolve_log_level() during logger setup.
     parser.set_defaults(log_level=os.getenv('LOG_LEVEL') or DEFAULT_LOG_LEVEL)
+    # SEMANTIC_COMMAND_ENABLED is env-only (no CLI flag); the boolean
+    # interpretation is owned by the command_matching package.
+    parser.set_defaults(
+        semantic_command_enabled=parse_enabled(os.getenv('SEMANTIC_COMMAND_ENABLED'))
+    )
 
     options = parser.parse_args(args)
 
@@ -155,7 +162,17 @@ def create_pipeline(
     return pipeline
 
 
+def run_startup_index_check(metadata_store: MetadataStore, logger: logging.Logger) -> None:
+    """Startup phase: reconcile the index against disk and log the counts."""
+    cleaned, remaining = metadata_store.rebuild_index()
+    logger.info("Index rebuilt: cleaned %d records, %d records remain", cleaned, remaining)
+
+
 def main(args=None):
+    # Load .env only at the product entry point; importing this module must
+    # stay side-effect free so tests never inherit local environment values.
+    dotenv.load_dotenv()
+
     config = parse_config(args)
     logger = setup_logger(config.log_level)
 
@@ -163,10 +180,9 @@ def main(args=None):
     client = dingtalk_stream.DingTalkStreamClient(credential, logger=logger)
 
     metadata_store = MetadataStore(output_dir=config.output_dir)
-    cleaned, remaining = metadata_store.rebuild_index()
-    logger.info("Index rebuilt: cleaned %d records, %d records remain", cleaned, remaining)
+    run_startup_index_check(metadata_store, logger)
 
-    matcher = build_command_matcher()
+    matcher = build_command_matcher(enabled=config.semantic_command_enabled)
     pipeline = create_pipeline(config.output_dir, metadata_store, client, matcher, logger)
     client.register_callback_handler(dingtalk_stream.chatbot.ChatbotMessage.TOPIC, pipeline)
 

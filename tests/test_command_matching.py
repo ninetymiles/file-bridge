@@ -1,36 +1,24 @@
 """Unit tests for command matchers and the matcher selection factory.
 
 The semantic backend module imports fastembed at module top level. General
-tests never load the native stack: a minimal stub is registered before the
-semantic module is imported, and only the semantic smoke test (marker
+tests never load the native stack: conftest installs a minimal fastembed stub
+before test modules are collected, and only the semantic smoke test (marker
 ``semantic``) imports the real fastembed in a separate pytest session.
 """
 
 import importlib
 import logging
 import sys
-import types
 
 import numpy as np
 import pytest
-
-if "fastembed" not in sys.modules:
-    _fastembed_stub = types.ModuleType("fastembed")
-
-    class _StubTextEmbedding:
-        """Records constructor kwargs; general tests never call embed()."""
-
-        def __init__(self, **kwargs):
-            self.init_kwargs = kwargs
-
-    _fastembed_stub.TextEmbedding = _StubTextEmbedding
-    _fastembed_stub._file_bridge_test_stub = True
-    sys.modules["fastembed"] = _fastembed_stub
 
 from app.services.command_matching import (  # noqa: E402
     REBUILD_INDEX,
     SubstringCommandMatcher,
     build_command_matcher,
+    is_inquiry_text,
+    parse_enabled,
 )
 from app.services.command_matching.semantic import (  # noqa: E402
     DEFAULT_MODEL_CACHE_DIR,
@@ -49,6 +37,15 @@ async def test_substring_matches_catalog_phrases():
     assert await matcher.match("请重建索引谢谢") == REBUILD_INDEX
     assert await matcher.match("重新建立索引") == REBUILD_INDEX
     assert await matcher.match("please rebuild index now") == REBUILD_INDEX
+    # Verify/sync phrasings added for the consistency-check intent.
+    assert await matcher.match("帮我检查索引") == REBUILD_INDEX
+    assert await matcher.match("校验索引") == REBUILD_INDEX
+    assert await matcher.match("检查文件索引") == REBUILD_INDEX
+    assert await matcher.match("同步索引") == REBUILD_INDEX
+    assert await matcher.match("同步文件索引") == REBUILD_INDEX
+    assert await matcher.match("刷新索引") == REBUILD_INDEX
+    assert await matcher.match("刷新文件索引") == REBUILD_INDEX
+    assert await matcher.match("更新索引") == REBUILD_INDEX
 
 
 @pytest.mark.asyncio
@@ -64,6 +61,36 @@ async def test_substring_resolves_conflicts_by_catalog_order():
     catalog = {"first": ("索引",), "second": ("重建索引",)}
     matcher = SubstringCommandMatcher(catalog)
     assert await matcher.match("重建索引") == "first"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "更新索引了吗",
+        "索引同步好了吗",
+        "刷新索引完成了吗",
+        "现在有多少索引",
+        "索引状态怎么样",
+        "查询索引状态吗",
+        "查询索引状态",
+    ],
+)
+def test_is_inquiry_text_flags_inquiries(text):
+    assert is_inquiry_text(text) is True
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "更新索引",
+        "帮我检查索引",
+        "重建索引",
+        "同步文件索引",
+        "",  # empty is not an inquiry; the empty short-circuit handles it
+    ],
+)
+def test_is_inquiry_text_passes_commands(text):
+    assert is_inquiry_text(text) is False
 
 
 class ScriptedEmbedder:
@@ -164,32 +191,34 @@ class _FakeEmbedder:
         pass
 
 
-@pytest.mark.parametrize("raw_value", ["", "false", "0", "FALSE", "garbage"])
-def test_factory_defaults_to_substring(monkeypatch, caplog, raw_value):
-    monkeypatch.setenv("SEMANTIC_COMMAND_ENABLED", raw_value)
-    sys.modules.pop(_SEMANTIC_MODULE_PATH, None)
+@pytest.mark.parametrize(
+    "raw,expected",
+    [
+        (None, False),
+        ("", False),
+        ("false", False),
+        ("0", False),
+        ("FALSE", False),
+        ("garbage", False),
+        (" true ", True),
+        ("true", True),
+        ("TRUE", True),
+        ("1", True),
+    ],
+)
+def test_parse_enabled_interprets_boolish_values(raw, expected):
+    assert parse_enabled(raw) is expected
+
+
+def test_factory_builds_substring_when_disabled(caplog):
     caplog.set_level(logging.INFO, logger="file-bridge")
 
-    try:
-        matcher = build_command_matcher()
+    matcher = build_command_matcher(False)
 
-        assert isinstance(matcher, SubstringCommandMatcher)
-        assert "substring" in caplog.text
-        assert _SEMANTIC_MODULE_PATH not in sys.modules
-        assert getattr(sys.modules.get("fastembed"), "_file_bridge_test_stub", False)
-    finally:
-        # Restore a stable module object so later tests patch the same target
-        # the factory's local import resolves.
-        importlib.import_module(_SEMANTIC_MODULE_PATH)
-
-
-def test_factory_unset_env_is_substring(monkeypatch):
-    monkeypatch.delenv("SEMANTIC_COMMAND_ENABLED", raising=False)
-    sys.modules.pop(_SEMANTIC_MODULE_PATH, None)
-    try:
-        assert isinstance(build_command_matcher(), SubstringCommandMatcher)
-    finally:
-        importlib.import_module(_SEMANTIC_MODULE_PATH)
+    assert isinstance(matcher, SubstringCommandMatcher)
+    assert "substring" in caplog.text
+    # The opt-out branch never touches a real inference backend.
+    assert getattr(sys.modules.get("fastembed"), "_file_bridge_test_stub", False)
 
 
 def _patch_semantic_backend(monkeypatch, matcher_class):
@@ -198,13 +227,11 @@ def _patch_semantic_backend(monkeypatch, matcher_class):
     monkeypatch.setattr(semantic_module, "FastEmbedEmbedder", _FakeEmbedder)
 
 
-@pytest.mark.parametrize("raw_value", ["true", "TRUE", "1"])
-def test_factory_enables_semantic(monkeypatch, caplog, raw_value):
-    monkeypatch.setenv("SEMANTIC_COMMAND_ENABLED", raw_value)
+def test_factory_builds_semantic_when_enabled(monkeypatch, caplog):
     _patch_semantic_backend(monkeypatch, _FakeSemanticMatcher)
     caplog.set_level(logging.INFO, logger="file-bridge")
 
-    matcher = build_command_matcher()
+    matcher = build_command_matcher(True)
 
     assert isinstance(matcher, _FakeSemanticMatcher)
     assert "semantic" in caplog.text
@@ -212,8 +239,7 @@ def test_factory_enables_semantic(monkeypatch, caplog, raw_value):
 
 
 def test_factory_propagates_semantic_construction_failure(monkeypatch):
-    monkeypatch.setenv("SEMANTIC_COMMAND_ENABLED", "true")
     _patch_semantic_backend(monkeypatch, _FailingSemanticMatcher)
 
     with pytest.raises(RuntimeError, match="model unavailable"):
-        build_command_matcher()
+        build_command_matcher(True)

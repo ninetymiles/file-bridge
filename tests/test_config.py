@@ -1,6 +1,10 @@
 """Unit tests for configuration parsing."""
 
 import logging
+import os
+import subprocess
+import sys
+from pathlib import Path
 
 import pytest
 from app.main import parse_config, resolve_log_level, setup_logger
@@ -140,3 +144,50 @@ def test_setup_logger_attaches_no_private_handler():
     setup_logger()
     app_logger = logging.getLogger("file-bridge")
     assert app_logger.handlers == []
+
+
+def test_semantic_command_enabled_defaults_off(monkeypatch):
+    monkeypatch.delenv("SEMANTIC_COMMAND_ENABLED", raising=False)
+    monkeypatch.setenv("CLIENT_ID", "test_id")
+    monkeypatch.setenv("CLIENT_SECRET", "test_secret")
+
+    config = parse_config([])
+    assert config.semantic_command_enabled is False
+
+
+def test_semantic_command_enabled_read_from_env(monkeypatch):
+    monkeypatch.setenv("CLIENT_ID", "test_id")
+    monkeypatch.setenv("CLIENT_SECRET", "test_secret")
+    monkeypatch.setenv("SEMANTIC_COMMAND_ENABLED", "true")
+
+    config = parse_config([])
+    assert config.semantic_command_enabled is True
+
+
+def test_importing_app_main_does_not_load_dotenv():
+    """Importing app.main must be side-effect free and never load .env.
+
+    Runs in a clean subprocess at the project root. With a local .env setting
+    SEMANTIC_COMMAND_ENABLED, an import-time load_dotenv() would surface as
+    the variable appearing after import; with no .env (CI) the assertion holds
+    trivially.
+    """
+    project_root = Path(__file__).resolve().parents[1]
+    clean_env = {
+        key: value for key, value in os.environ.items()
+        if key != "SEMANTIC_COMMAND_ENABLED"
+    }
+    code = (
+        "import os\n"
+        "assert 'SEMANTIC_COMMAND_ENABLED' not in os.environ\n"
+        "import app.main\n"
+        "assert 'SEMANTIC_COMMAND_ENABLED' not in os.environ\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        cwd=project_root,
+        env=clean_env,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
