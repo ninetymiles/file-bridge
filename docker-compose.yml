@@ -7,5 +7,14 @@ services:
     volumes:
       - ./output:/app/output
       - ./cache:/app/cache
+      #- file-bridge-storage:/app/cache
     env_file:
       - .env
+    environment:
+      #- HTTP_PROXY=http://127.0.0.1:3128
+      #- HTTPS_PROXY=http://127.0.0.1:3128
+      - NO_PROXY=localhost,127.0.0.1,192.168.0.0/16,172.16.0.0/16,10.0.0.0/8,.cn,dingtalk.com,hf-mirror.com
+      - HF_ENDPOINT=https://hf-mirror.com
+      - HF_HUB_DISABLE_XET=1
+volumes:
+  file-bridge-storage:
