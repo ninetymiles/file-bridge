@@ -5,11 +5,7 @@ services:
     container_name: file-bridge
     restart: unless-stopped
     volumes:
-      - file-bridge-storage:/app/cache
-      - ./output:/output
+      - ./output:/app/output
+      - ./cache:/app/cache
     env_file:
       - .env
-    environment:
-      OUTPUT_DIR: /output
-volumes:
-  file-bridge-storage:
