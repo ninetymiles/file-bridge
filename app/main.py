@@ -3,6 +3,7 @@
 import argparse
 import logging
 import os
+from functools import partial
 from typing import List, Optional
 import dingtalk_stream
 import dotenv
@@ -21,6 +22,7 @@ from app.handlers import (
     CommandHandler,
     MediaFileHandler,
 )
+from app.utils.file_storage import write_activity_file
 
 DEFAULT_OUTPUT_DIR = "./output"
 DEFAULT_LOG_LEVEL = "INFO"
@@ -33,6 +35,45 @@ LOG_LEVELS = {
     "WARNING": logging.WARNING,
     "ERROR": logging.ERROR,
 }
+
+
+class _DingTalkStreamLogFilter(logging.Filter):
+    """Reshape dingtalk_stream connection logs to concise INFO conclusions.
+
+    The SDK routes its logs through the application logger (name=file-bridge,
+    filename=stream.py). This filter rewrites verbose connection records into
+    short conclusion lines and downgrades the open-connection URL line to
+    DEBUG, so INFO stays focused on lifecycle outcomes without leaking
+    endpoint tickets or disconnect JSON payloads.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if record.name != "file-bridge" or record.filename != "stream.py":
+            return True
+
+        msg = record.getMessage()
+        if msg.startswith("received disconnect topic=disconnect"):
+            record.msg = "DingTalk stream disconnected: received disconnect message"
+            record.args = ()
+        elif msg.startswith("endpoint is "):
+            record.msg = "DingTalk stream connected."
+            record.args = ()
+        elif msg.startswith("open connection, url="):
+            record.levelno = logging.DEBUG
+            record.levelname = "DEBUG"
+        return True
+
+
+def get_app_version() -> str:
+    """Return the running version from the APP_VERSION env var (default "dev").
+
+    The version is injected by the CI build from the git tag via a Dockerfile
+    ARG/ENV pair; local runs and builds without the build arg fall back to
+    "dev". ``or`` is used (instead of a default value on ``getenv``) so an
+    empty APP_VERSION also resolves to "dev" (branch pushes can yield an
+    empty meta.outputs.version).
+    """
+    return os.getenv("APP_VERSION") or "dev"
 
 
 def resolve_log_level(raw: Optional[str]) -> int:
@@ -54,8 +95,19 @@ def setup_logger(log_level: Optional[str] = DEFAULT_LOG_LEVEL) -> logging.Logger
     The file-bridge logger follows LOG_LEVEL and emits through the root
     handler via propagation: no private handler is attached, avoiding
     duplicate output.
+
+    A handler-level filter reshapes dingtalk_stream connection records
+    (name=file-bridge, filename=stream.py) into concise INFO conclusions
+    and downgrades the open-connection URL line to DEBUG. The httpx logger
+    is pinned to WARNING so per-request INFO lines (which carry signed OSS
+    URLs) never appear at the default level.
     """
     logging.basicConfig(level=logging.INFO, format=LOG_FORMAT)
+    root = logging.getLogger()
+    for handler in root.handlers:
+        handler.addFilter(_DingTalkStreamLogFilter())
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+
     logger = logging.getLogger("file-bridge")
     logger.setLevel(resolve_log_level(log_level))
     if log_level is not None and log_level.strip().upper() not in LOG_LEVELS:
@@ -158,6 +210,7 @@ def create_pipeline(
             ),
         ],
         logger=logger,
+        storage_probe=partial(write_activity_file, output_dir),
     )
     return pipeline
 
@@ -168,6 +221,37 @@ def run_startup_index_check(metadata_store: MetadataStore, logger: logging.Logge
     logger.info("Index rebuilt: cleaned %d records, %d records remain", cleaned, remaining)
 
 
+def log_startup_summary(config: argparse.Namespace, logger: logging.Logger) -> None:
+    """Emit the version line and the effective configuration summary at INFO.
+
+    Printed after logger setup and before the DingTalk connection is opened, so
+    operators can confirm which build and which bot/options are running from
+    the first lines of the log. client_secret is deliberately never read here.
+    """
+    logger.info("File Bridge starting: version=%s", get_app_version())
+
+    semantic = "on (semantic)" if config.semantic_command_enabled else "off (substring)"
+    if config.notify_staff_id:
+        notify_staff = f"on (staff={config.notify_staff_id})"
+    else:
+        notify_staff = "off"
+    if config.notify_conversation_id:
+        notify_group = f"on (conversation={config.notify_conversation_id})"
+    else:
+        notify_group = "off"
+
+    logger.info(
+        "Configuration: client_id=%s, log_level=%s, semantic_command=%s, "
+        "notify_staff=%s, notify_group=%s, output_dir=%s",
+        config.client_id,
+        config.log_level,
+        semantic,
+        notify_staff,
+        notify_group,
+        config.output_dir,
+    )
+
+
 def main(args=None):
     # Load .env only at the product entry point; importing this module must
     # stay side-effect free so tests never inherit local environment values.
@@ -175,6 +259,7 @@ def main(args=None):
 
     config = parse_config(args)
     logger = setup_logger(config.log_level)
+    log_startup_summary(config, logger)
 
     credential = dingtalk_stream.Credential(config.client_id, config.client_secret)
     client = dingtalk_stream.DingTalkStreamClient(credential, logger=logger)

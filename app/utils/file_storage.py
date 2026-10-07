@@ -7,6 +7,23 @@ from datetime import datetime
 from typing import Optional
 
 
+ACTIVITY_FILENAME = ".activity"
+
+
+def write_activity_file(output_dir: str) -> None:
+    """Overwrite OUTPUT_DIR/.activity with the current timestamp, then fsync.
+
+    Storage-warmup probe: a real write reaches the storage server and forces
+    a sleeping disk to wake, unlike existence checks which may hit client
+    caches and falsely succeed on a cold volume.
+    """
+    path = os.path.join(output_dir, ACTIVITY_FILENAME)
+    with open(path, "w") as f:
+        f.write(datetime.now().isoformat())
+        f.flush()
+        os.fsync(f.fileno())
+
+
 def sanitize_sender_name(sender: Optional[str]) -> str:
     """Sanitize sender name for safe filename usage."""
     if not sender:

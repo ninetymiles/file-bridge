@@ -1,6 +1,7 @@
 # syntax=docker/dockerfile:1
 FROM python:3.14-slim
 ARG UV_INDEX
+ARG APP_VERSION=dev
 
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 WORKDIR /app
@@ -17,5 +18,6 @@ COPY app/ ./app/
 
 ENV PATH="/app/.venv/bin:$PATH"
 ENV PYTHONUNBUFFERED=1
+ENV APP_VERSION=$APP_VERSION
 
 CMD ["python", "-m", "app.main"]

@@ -1,5 +1,6 @@
 """Unit tests for configuration parsing."""
 
+import argparse
 import logging
 import os
 import subprocess
@@ -7,7 +8,14 @@ import sys
 from pathlib import Path
 
 import pytest
-from app.main import parse_config, resolve_log_level, setup_logger
+from app.main import (
+    parse_config,
+    resolve_log_level,
+    setup_logger,
+    get_app_version,
+    log_startup_summary,
+    _DingTalkStreamLogFilter,
+)
 
 
 def test_default_output_dir(monkeypatch):
@@ -191,3 +199,132 @@ def test_importing_app_main_does_not_load_dotenv():
         text=True,
     )
     assert result.returncode == 0, result.stderr
+
+
+def test_get_app_version_returns_env_value(monkeypatch):
+    monkeypatch.setenv("APP_VERSION", "1.2.3")
+    assert get_app_version() == "1.2.3"
+
+
+def test_get_app_version_empty_string_falls_back_to_dev(monkeypatch):
+    monkeypatch.setenv("APP_VERSION", "")
+    assert get_app_version() == "dev"
+
+
+def test_get_app_version_unset_falls_back_to_dev(monkeypatch):
+    monkeypatch.delenv("APP_VERSION", raising=False)
+    assert get_app_version() == "dev"
+
+
+def _make_config(**overrides):
+    base = dict(
+        client_id="cid_123",
+        client_secret="super_secret_value",
+        log_level="INFO",
+        semantic_command_enabled=False,
+        notify_staff_id=None,
+        notify_conversation_id=None,
+        output_dir="./output",
+    )
+    base.update(overrides)
+    return argparse.Namespace(**base)
+
+
+def test_log_startup_summary_all_off(monkeypatch, caplog):
+    monkeypatch.delenv("APP_VERSION", raising=False)
+    config = _make_config()
+    with caplog.at_level(logging.INFO, logger="file-bridge"):
+        log_startup_summary(config, logging.getLogger("file-bridge"))
+
+    text = caplog.text
+    assert "File Bridge starting: version=dev" in text
+    assert "client_id=cid_123" in text
+    assert "log_level=INFO" in text
+    assert "semantic_command=off (substring)" in text
+    assert "notify_staff=off" in text
+    assert "notify_group=off" in text
+    assert "output_dir=./output" in text
+    # Secret must never appear in startup logs.
+    assert "super_secret_value" not in text
+
+
+def test_log_startup_summary_all_on(monkeypatch, caplog):
+    monkeypatch.setenv("APP_VERSION", "1.2.0")
+    config = _make_config(
+        semantic_command_enabled=True,
+        notify_staff_id="staff_001",
+        notify_conversation_id="conv_abc",
+    )
+    with caplog.at_level(logging.INFO, logger="file-bridge"):
+        log_startup_summary(config, logging.getLogger("file-bridge"))
+
+    text = caplog.text
+    assert "File Bridge starting: version=1.2.0" in text
+    assert "semantic_command=on (semantic)" in text
+    assert "notify_staff=on (staff=staff_001)" in text
+    assert "notify_group=on (conversation=conv_abc)" in text
+    assert "super_secret_value" not in text
+
+
+def _make_stream_record(msg: str, level: int = logging.INFO) -> logging.LogRecord:
+    record = logging.LogRecord(
+        name="file-bridge",
+        level=level,
+        pathname="/app/.venv/lib/python3.14/site-packages/dingtalk_stream/stream.py",
+        lineno=1,
+        msg=msg,
+        args=(),
+        exc_info=None,
+    )
+    record.filename = "stream.py"
+    return record
+
+
+def test_filter_rewrites_disconnect_to_conclusion():
+    record = _make_stream_record(
+        "received disconnect topic=disconnect message={'content': 'long json'}"
+    )
+    assert _DingTalkStreamLogFilter().filter(record) is True
+    assert record.getMessage() == "DingTalk stream disconnected: received disconnect message"
+
+
+def test_filter_rewrites_endpoint_to_connected():
+    record = _make_stream_record("endpoint is {'endpoint': 'wss://...', 'ticket': 'abc'}")
+    assert _DingTalkStreamLogFilter().filter(record) is True
+    assert record.getMessage() == "DingTalk stream connected."
+
+
+def test_filter_downgrades_open_connection_to_debug():
+    record = _make_stream_record("open connection, url=wss://dingtalk.example/stream")
+    assert _DingTalkStreamLogFilter().filter(record) is True
+    assert record.levelno == logging.DEBUG
+
+
+def test_filter_passes_unrelated_records_unchanged():
+    record = _make_stream_record("[start] network exception, will retry")
+    original_msg = record.getMessage()
+    original_level = record.levelno
+    assert _DingTalkStreamLogFilter().filter(record) is True
+    assert record.getMessage() == original_msg
+    assert record.levelno == original_level
+
+
+def test_filter_ignores_non_stream_records():
+    record = logging.LogRecord(
+        name="file-bridge",
+        level=logging.INFO,
+        pathname="app/handlers/message.py",
+        lineno=1,
+        msg="Received private message from alice, type=text",
+        args=(),
+        exc_info=None,
+    )
+    record.filename = "message.py"
+    original_msg = record.getMessage()
+    assert _DingTalkStreamLogFilter().filter(record) is True
+    assert record.getMessage() == original_msg
+
+
+def test_setup_logger_sets_httpx_to_warning():
+    setup_logger("INFO")
+    assert logging.getLogger("httpx").level == logging.WARNING

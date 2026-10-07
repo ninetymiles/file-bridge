@@ -1,5 +1,6 @@
 """Unit tests for MediaFileHandler."""
 
+import logging
 import os
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -218,7 +219,7 @@ async def test_rich_text_single_image(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_rich_text_multiple_images(tmp_path):
+async def test_rich_text_multiple_images(tmp_path, caplog):
     output_dir = tmp_path / "output"
     temp1 = tmp_path / "t1.tmp"
     temp1.write_bytes(b"pic1")
@@ -258,7 +259,8 @@ async def test_rich_text_multiple_images(tmp_path):
     }
     msg = ChatbotMessage.from_dict(raw_data)
 
-    intent = await handler.handle(msg, raw_data, mock_pipeline)
+    with caplog.at_level(logging.INFO):
+        intent = await handler.handle(msg, raw_data, mock_pipeline)
     assert intent is not None
     assert intent.tier == ReplyTier.PRIMARY
 
@@ -267,6 +269,14 @@ async def test_rich_text_multiple_images(tmp_path):
     lines = intent.text.split("\n")
     assert len(lines) == 2
     assert all("文件接收成功，已保存为:" in line for line in lines)
+
+    # Each picture emits exactly one download-start INFO line; codes stay out.
+    downloading = [
+        r.message for r in caplog.records
+        if r.levelno == logging.INFO and r.message.startswith("Downloading file:")
+    ]
+    assert len(downloading) == 2
+    assert all("code_1" not in m and "code_2" not in m for m in downloading)
 
 
 @pytest.mark.asyncio

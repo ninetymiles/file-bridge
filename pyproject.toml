@@ -1,8 +1,10 @@
 [project]
 name = "file-bridge"
+# The real runtime version is injected via the APP_VERSION env var
+# (git tag -> CI build-arg -> Dockerfile ARG/ENV). package=false means
+# this field is never consumed at runtime; it exists solely to satisfy
+# uv's PEP 621 parser (version is mandatory when [project] is present).
 version = "1.0.0"
-description = "DingTak chat bot backend."
-readme = "README.md"
 
 requires-python = ">=3.14"
 dependencies = [

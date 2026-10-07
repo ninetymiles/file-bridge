@@ -19,6 +19,7 @@ from app.services.command_matching import (
     is_inquiry_text,
     normalize_command_text,
 )
+from app.services.disk_warmup import ensure_storage_ready
 from app.services.media_metadata import extract_media_metadata
 from app.utils.file_storage import save_file
 
@@ -49,6 +50,33 @@ class ReplyIntent:
 
     tier: ReplyTier
     text: str
+
+
+def merge_rich_text_segments(segments) -> tuple[str, bool]:
+    """Merge richText segments into a single semantic text string.
+
+    Text segments are concatenated as-is, except standalone @ mention
+    segments (matching ^@\\S+$) are removed. Picture segments are
+    replaced with <imgN> placeholders (N starts at 1).
+
+    Returns the merged text and a flag telling whether any picture
+    segment was present; the flag is the "has picture" signal reused
+    by the unmatched-command fallback decision.
+    """
+    result_parts = []
+    img_counter = 0
+    for seg in segments:
+        if not isinstance(seg, dict):
+            continue
+        if "text" in seg:
+            text = seg["text"]
+            if isinstance(text, str) and re.match(r"^@\S+$", text):
+                continue
+            result_parts.append(str(text))
+        elif "downloadCode" in seg:
+            img_counter += 1
+            result_parts.append(f"<img{img_counter}>")
+    return "".join(result_parts), img_counter > 0
 
 
 class BaseMessageHandler(ABC):
@@ -185,6 +213,14 @@ def build_guide_reply(has_real_text: bool) -> str:
 UNSUPPORTED_AUDIO_TEXT = "不好意思，语音消息我暂时还不支持接收哦。"
 UNSUPPORTED_TYPE_TEXT = "不好意思，这种类型的消息我暂时还不支持接收。"
 
+# Storage warmup notices, sent by the Dispatcher outside the intent model.
+WAKING_STORAGE_TEXT = "正在唤醒存储服务，请稍候…"
+STORAGE_UNAVAILABLE_TEXT = "存储服务暂时不可用，请稍后重试"
+
+
+def _always_ready_probe() -> None:
+    """Default storage probe: assumes storage is always ready (no-op)."""
+
 
 class CommandHandler(BaseMessageHandler):
     """Resolve text commands with a matcher and dispatch them by command id."""
@@ -244,30 +280,8 @@ class CommandHandler(BaseMessageHandler):
 
     @staticmethod
     def _merge_rich_text(segments) -> tuple[str, bool]:
-        """Merge richText segments into a single semantic text string.
-
-        Text segments are concatenated as-is, except standalone @ mention
-        segments (matching ^@\\S+$) are removed. Picture segments are
-        replaced with <imgN> placeholders (N starts at 1).
-
-        Returns the merged text and a flag telling whether any picture
-        segment was present; the flag is the "has picture" signal reused
-        by the unmatched-command fallback decision.
-        """
-        result_parts = []
-        img_counter = 0
-        for seg in segments:
-            if not isinstance(seg, dict):
-                continue
-            if "text" in seg:
-                text = seg["text"]
-                if isinstance(text, str) and re.match(r"^@\S+$", text):
-                    continue
-                result_parts.append(str(text))
-            elif "downloadCode" in seg:
-                img_counter += 1
-                result_parts.append(f"<img{img_counter}>")
-        return "".join(result_parts), img_counter > 0
+        """Backward-compatible thin wrapper around merge_rich_text_segments."""
+        return merge_rich_text_segments(segments)
 
 
 class MediaFileHandler(BaseMessageHandler):
@@ -366,6 +380,13 @@ class MediaFileHandler(BaseMessageHandler):
         phase (dedupe/save/commit) is not.
         """
         # --- Interruptible phase: download ---
+        # INFO marker before any download I/O so a cold-disk stall leaves a
+        # trace of which media entered the pipeline. No code/URL/token here.
+        self.logger.info(
+            "Downloading file: type=%s, name=%s",
+            msgtype,
+            original_filename,
+        )
         download_task = asyncio.create_task(self._download_phase(download_code))
         self._interruptible_tasks.add(download_task)
         try:
@@ -490,6 +511,7 @@ class PipelineHandler(dingtalk_stream.ChatbotHandler):
         self,
         handlers: Optional[List[BaseMessageHandler]] = None,
         logger: Optional[logging.Logger] = None,
+        storage_probe: Optional[Callable[[], None]] = None,
     ):
         super().__init__()
         self.handlers: List[BaseMessageHandler] = handlers or []
@@ -497,14 +519,36 @@ class PipelineHandler(dingtalk_stream.ChatbotHandler):
             self.logger = logger
         else:
             self.logger = logging.getLogger(__name__)
+        # Blocking storage warmup probe, run in a worker thread at dispatch
+        # entry. Assembly binds the output-volume probe; tests may override.
+        self.storage_probe = storage_probe or _always_ready_probe
         # Shutdown drain state: in-flight SDK message tasks (set of asyncio.Task).
         # Each message runs in its own SDK-created task; process() registers it.
         self._draining = False
         self._active_tasks: set[asyncio.Task] = set()
 
     async def async_reply_text(self, text: str, incoming_message: ChatbotMessage):
-        """Send a text reply asynchronously in a worker thread."""
-        return await asyncio.to_thread(self.reply_text, text, incoming_message)
+        """Send a text reply asynchronously in a worker thread, then log it.
+
+        The DingTalk send runs before the local log write. The warmup and
+        storage-unavailable notices are dispatched from inside
+        ensure_storage_ready while the storage probe may still be waking a
+        cold disk; a synchronous local log I/O must not delay the
+        user-facing send, so logging happens after to_thread returns.
+        """
+        result = await asyncio.to_thread(self.reply_text, text, incoming_message)
+
+        conversation_type = incoming_message.conversation_type
+        if conversation_type == "2":
+            target = f"group ({incoming_message.conversation_title or 'unknown group'})"
+        else:
+            target = f"private ({incoming_message.sender_nick or 'unknown'})"
+
+        if result is None:
+            self.logger.warning("Reply failed to %s: %s", target, text)
+        else:
+            self.logger.info("Replied to %s: %s", target, text)
+        return result
 
     def is_draining(self) -> bool:
         """Return True after the shutdown intake gate has been closed."""
@@ -556,11 +600,13 @@ class PipelineHandler(dingtalk_stream.ChatbotHandler):
             self._active_tasks.discard(task)
 
     def _log_received_message(self, message: ChatbotMessage, raw_data: dict) -> None:
-        """Emit the INFO metadata summary and DEBUG typed content logs.
+        """Emit the INFO metadata summary (with text/richText body) and DEBUG
+        credential/detail logs.
 
-        INFO must stay free of message bodies, download codes and URLs;
-        DEBUG carries the full typed content. All logs run before any
-        payload normalization (e.g. group @ prefix stripping).
+        The INFO summary now carries the readable body for text and richText
+        so operators can follow a message at INFO without DEBUG. downloadCode,
+        raw payload and callback headers stay at DEBUG. All logs run before
+        any payload normalization (e.g. group @ prefix stripping).
         """
         sender = message.sender_nick or raw_data.get("senderNick") or "unknown"
         msg_type = message.message_type or raw_data.get("msgtype") or "unknown"
@@ -575,7 +621,14 @@ class PipelineHandler(dingtalk_stream.ChatbotHandler):
         else:
             summary = f"Received message from {sender}, type={msg_type}"
 
-        if msg_type == "richText":
+        if msg_type == "text":
+            text_content = ""
+            if message.text and message.text.content:
+                text_content = message.text.content
+            elif isinstance(raw_data.get("text"), dict):
+                text_content = raw_data["text"].get("content", "")
+            summary += f", content={text_content}"
+        elif msg_type == "richText":
             segments = []
             if message.rich_text_content and message.rich_text_content.rich_text_list:
                 segments = message.rich_text_content.rich_text_list
@@ -583,7 +636,11 @@ class PipelineHandler(dingtalk_stream.ChatbotHandler):
                 segments = content["richText"]
             text_count = sum(1 for item in segments if isinstance(item, dict) and "text" in item)
             picture_count = sum(1 for item in segments if isinstance(item, dict) and "downloadCode" in item)
-            summary += f", segments={len(segments)} ({text_count} text, {picture_count} picture)"
+            merged, _ = merge_rich_text_segments(segments)
+            summary += (
+                f", segments={len(segments)} ({text_count} text, {picture_count} picture)"
+                f", content={merged}"
+            )
         elif msg_type in ("file", "video"):
             filename = content.get("fileName")
             if filename:
@@ -591,14 +648,8 @@ class PipelineHandler(dingtalk_stream.ChatbotHandler):
 
         self.logger.info(summary)
 
-        if msg_type == "text":
-            text_content = ""
-            if message.text and message.text.content:
-                text_content = message.text.content
-            elif isinstance(raw_data.get("text"), dict):
-                text_content = raw_data["text"].get("content", "")
-            self.logger.debug("Text content: %s", text_content)
-        elif msg_type == "richText":
+        # DEBUG-only credential/detail logs: never promote these to INFO.
+        if msg_type == "richText":
             segments = []
             if message.rich_text_content and message.rich_text_content.rich_text_list:
                 segments = message.rich_text_content.rich_text_list
@@ -608,8 +659,6 @@ class PipelineHandler(dingtalk_stream.ChatbotHandler):
             for index, item in enumerate(segments, start=1):
                 if not isinstance(item, dict):
                     self.logger.debug("RichText segment[%d/%d] non-dict segment: %r", index, total, item)
-                elif "text" in item:
-                    self.logger.debug("RichText segment[%d/%d] text: %s", index, total, item["text"])
                 elif "downloadCode" in item:
                     self.logger.debug(
                         "RichText segment[%d/%d] picture: type=%s, downloadCode=%s",
@@ -647,6 +696,21 @@ class PipelineHandler(dingtalk_stream.ChatbotHandler):
         """Run the handler chain for one message."""
         raw_data = callback.data or {}
         incoming_message = ChatbotMessage.from_dict(raw_data)
+
+        # Storage warmup must complete before the first log line: that log
+        # write is synchronous stderr I/O and would otherwise stall the event
+        # loop (and the warmup timer itself) on a sleeping disk. The warmup
+        # notice and the unavailable notice are sent by the Dispatcher
+        # directly, outside the intent model.
+        try:
+            await ensure_storage_ready(
+                probe=self.storage_probe,
+                on_waking=lambda: self.async_reply_text(WAKING_STORAGE_TEXT, incoming_message),
+            )
+        except Exception as e:
+            self.logger.error(f"Storage warmup probe failed: {e}", exc_info=True)
+            await self.async_reply_text(STORAGE_UNAVAILABLE_TEXT, incoming_message)
+            return AckMessage.STATUS_OK, "OK"
 
         # INFO metadata summary first, then DEBUG typed content; both
         # precede any payload normalization (e.g. group @ prefix stripping)
