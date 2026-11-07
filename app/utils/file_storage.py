@@ -1,4 +1,4 @@
-"""File storage utilities for sanitization, directory structure, and persisting downloaded files."""
+"""File storage utilities for sanitization, naming, and persisting downloaded files."""
 
 import os
 import re
@@ -24,15 +24,19 @@ def write_activity_file(output_dir: str) -> None:
         os.fsync(f.fileno())
 
 
-def sanitize_sender_name(sender: Optional[str]) -> str:
-    """Sanitize sender name for safe filename usage."""
-    if not sender:
-        return "unknown"
+def sanitize_sender_id(sender_id: Optional[str]) -> str:
+    """Sanitize sender staff id for safe filename usage.
+
+    Returns an empty string when the id is missing or nothing survives
+    sanitization. Callers use the empty string as the signal to omit the
+    sender segment from the filename entirely.
+    """
+    if not sender_id:
+        return ""
     # Remove characters invalid in filenames or dangerous for path traversal
-    cleaned = re.sub(r'[\\/*?:"<>|\[\]\x00-\x1f]', '', sender).strip()
+    cleaned = re.sub(r'[\\/*?:"<>|\[\]\x00-\x1f]', '', sender_id).strip()
     # Strip leading/trailing dots or spaces
-    cleaned = cleaned.strip('. ')
-    return cleaned if cleaned else "unknown"
+    return cleaned.strip('. ')
 
 
 def sanitize_extension(original_filename: Optional[str], default_ext: str = "") -> str:
@@ -58,38 +62,38 @@ def sanitize_extension(original_filename: Optional[str], default_ext: str = "") 
 
 
 def generate_saved_filename(
-    sender: Optional[str],
+    sender_staff_id: Optional[str],
     original_filename: Optional[str],
     timestamp: Optional[datetime] = None,
     default_ext: str = "",
 ) -> str:
-    """Generate safe filename in format '[sender]_timestamp.ext'."""
-    clean_sender = sanitize_sender_name(sender)
+    """Generate safe filename in format 'timestamp[_senderStaffId].ext'."""
+    clean_sender_id = sanitize_sender_id(sender_staff_id)
     clean_ext = sanitize_extension(original_filename, default_ext=default_ext)
 
     ts = timestamp or datetime.now()
     # Format timestamp with milliseconds: YYYYMMDD_HHMMSS_fff
     time_str = ts.strftime("%Y%m%d_%H%M%S_%f")[:19]
 
-    return f"[{clean_sender}]_{time_str}{clean_ext}"
+    sender_suffix = f"_{clean_sender_id}" if clean_sender_id else ""
+    return f"{time_str}{sender_suffix}{clean_ext}"
 
 
 def save_file(
     temp_path: str,
     output_dir: str,
-    sender: Optional[str],
+    sender_staff_id: Optional[str],
     original_filename: Optional[str],
     timestamp: Optional[datetime] = None,
     default_ext: str = "",
 ) -> str:
-    """Move temporary file to target date directory with formatted filename."""
-    ts = timestamp or datetime.now()
-    date_dir = ts.strftime("%Y-%m-%d")
-    target_dir = os.path.join(output_dir, date_dir)
-    os.makedirs(target_dir, exist_ok=True)
+    """Move temporary file into output_dir with formatted filename."""
+    os.makedirs(output_dir, exist_ok=True)
 
-    filename = generate_saved_filename(sender, original_filename, timestamp=ts, default_ext=default_ext)
-    target_path = os.path.join(target_dir, filename)
+    filename = generate_saved_filename(
+        sender_staff_id, original_filename, timestamp=timestamp, default_ext=default_ext
+    )
+    target_path = os.path.join(output_dir, filename)
 
     # Collision prevention if exact millisecond collision occurs
     counter = 1

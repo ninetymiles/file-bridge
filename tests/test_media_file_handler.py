@@ -50,6 +50,7 @@ async def test_media_file_handler_new_file(tmp_path):
         "msgtype": "file",
         "senderNick": "Alice",
         "senderId": "user_001",
+        "senderStaffId": "staff-001",
         "content": {
             "downloadCode": "code_123",
             "fileName": "test_doc.pdf",
@@ -67,6 +68,12 @@ async def test_media_file_handler_new_file(tmp_path):
     mock_store.async_insert_record.assert_called_once()
     saved_path_arg = mock_store.async_insert_record.call_args[1]["saved_path"]
     assert os.path.exists(saved_path_arg)
+    assert os.path.dirname(saved_path_arg) == str(output_dir)
+    assert os.path.basename(saved_path_arg).endswith("_staff-001.pdf")
+
+    insert_kwargs = mock_store.async_insert_record.call_args[1]
+    assert insert_kwargs["sender_id"] == "user_001"
+    assert insert_kwargs["sender_nick"] == "Alice"
 
     # Verify reply
     mock_pipeline.async_reply_text.assert_not_called()

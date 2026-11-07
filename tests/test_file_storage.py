@@ -4,20 +4,20 @@ import os
 from datetime import datetime
 import pytest
 from app.utils.file_storage import (
-    sanitize_sender_name,
+    sanitize_sender_id,
     sanitize_extension,
     generate_saved_filename,
     save_file,
 )
 
 
-def test_sanitize_sender_name():
-    assert sanitize_sender_name("Alice") == "Alice"
-    assert sanitize_sender_name("Bob/Admin") == "BobAdmin"
-    assert sanitize_sender_name("User: [Test]") == "User Test"
-    assert sanitize_sender_name("../../evil") == "evil"
-    assert sanitize_sender_name("") == "unknown"
-    assert sanitize_sender_name(None) == "unknown"
+def test_sanitize_sender_id():
+    assert sanitize_sender_id("Alice") == "Alice"
+    assert sanitize_sender_id("Bob/Admin") == "BobAdmin"
+    assert sanitize_sender_id("User: [Test]") == "User Test"
+    assert sanitize_sender_id("../../evil") == "evil"
+    assert sanitize_sender_id("") == ""
+    assert sanitize_sender_id(None) == ""
 
 
 def test_sanitize_extension():
@@ -34,11 +34,21 @@ def test_sanitize_extension():
 def test_generate_saved_filename():
     fixed_time = datetime(2026, 9, 24, 15, 30, 45, 123456)
     filename = generate_saved_filename(
-        sender="Alice",
+        sender_staff_id="staff-001",
         original_filename="document.pdf",
         timestamp=fixed_time,
     )
-    assert filename == "[Alice]_20260924_153045_123.pdf"
+    assert filename == "20260924_153045_123_staff-001.pdf"
+
+
+def test_generate_saved_filename_without_sender_id():
+    fixed_time = datetime(2026, 9, 24, 15, 30, 45, 123456)
+    filename = generate_saved_filename(
+        sender_staff_id=None,
+        original_filename="document.pdf",
+        timestamp=fixed_time,
+    )
+    assert filename == "20260924_153045_123.pdf"
 
 
 def test_save_file_directory_structure_and_collision(tmp_path):
@@ -52,14 +62,12 @@ def test_save_file_directory_structure_and_collision(tmp_path):
     saved_path1 = save_file(
         temp_path=str(temp_file1),
         output_dir=str(output_dir),
-        sender="Bob",
+        sender_staff_id="staff-001",
         original_filename="data.txt",
         timestamp=fixed_time,
     )
 
-    expected_date_dir = output_dir / "2026-09-24"
-    assert os.path.exists(expected_date_dir)
-    assert saved_path1 == str(expected_date_dir / "[Bob]_20260924_153045_123.txt")
+    assert saved_path1 == str(output_dir / "20260924_153045_123_staff-001.txt")
     assert os.path.exists(saved_path1)
 
     # Collision check: save another file with same timestamp and sender
@@ -69,7 +77,7 @@ def test_save_file_directory_structure_and_collision(tmp_path):
     saved_path2 = save_file(
         temp_path=str(temp_file2),
         output_dir=str(output_dir),
-        sender="Bob",
+        sender_staff_id="staff-001",
         original_filename="data.txt",
         timestamp=fixed_time,
     )

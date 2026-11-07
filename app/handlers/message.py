@@ -414,12 +414,11 @@ class MediaFileHandler(BaseMessageHandler):
 
             sender_nick = message.sender_nick or raw_data.get("senderNick")
             sender_id = message.sender_id or raw_data.get("senderId") or message.sender_staff_id or "unknown"
-            sender = sender_nick or sender_id
 
             saved_path = save_file(
                 temp_path=download_result.temp_path,
                 output_dir=self.output_dir,
-                sender=sender,
+                sender_staff_id=message.sender_staff_id,
                 original_filename=original_filename,
                 default_ext=default_ext,
             )
