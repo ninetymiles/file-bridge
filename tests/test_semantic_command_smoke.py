@@ -10,6 +10,7 @@ import sys
 import pytest
 
 from app.services.command_matching import (
+    INDEX_REPORT,
     REBUILD_INDEX,
     is_inquiry_text,
     normalize_command_text,
@@ -37,6 +38,16 @@ POSITIVE_SAMPLES = [
     "刷新索引",
     "刷新文件索引",
     "更新索引",
+]
+
+# Report phrasings must route to the report command, not to rebuild.
+REPORT_SAMPLES = [
+    "统计报告",
+    "生成统计报告",
+    "索引统计",
+    "统计索引",
+    "索引报告",
+    "分析文件索引",
 ]
 
 # Unrelated texts that the bare matcher itself must reject (below threshold).
@@ -93,6 +104,16 @@ async def test_positive_samples_match(matcher):
         if command_id != REBUILD_INDEX:
             misses.append(sample)
     assert len(misses) <= 1, f"positive samples missed: {misses}"
+
+
+@pytest.mark.asyncio
+async def test_report_samples_match_report_command(matcher):
+    misses = []
+    for sample in REPORT_SAMPLES:
+        command_id = await matcher.match(normalize_command_text(sample))
+        if command_id != INDEX_REPORT:
+            misses.append((sample, command_id))
+    assert len(misses) <= 1, f"report samples misrouted: {misses}"
 
 
 @pytest.mark.asyncio

@@ -255,6 +255,54 @@ async def test_end_to_end_file_and_rebuild_index_pipeline(tmp_path):
     await http_client.aclose()
 
 
+@pytest.mark.asyncio
+async def test_index_report_command_returns_totals_and_latest_day(tmp_path):
+    output_dir = tmp_path / "report_output"
+    metadata_store = MetadataStore(output_dir=str(output_dir))
+    metadata_store.insert_record(
+        "u1", "a.jpg", str(tmp_path / "a.jpg"), "s1", 1,
+        created_at="2026-11-07 10:00:00", media_type="picture",
+    )
+    metadata_store.insert_record(
+        "u2", "b.mp4", str(tmp_path / "b.mp4"), "s2", 2,
+        created_at="2026-11-07 11:00:00", media_type="video",
+    )
+    metadata_store.insert_record(
+        "u1", "c.pdf", str(tmp_path / "c.pdf"), "s3", 3,
+        created_at="2026-11-08 09:00:00", media_type="file",
+    )
+    metadata_store.insert_record(
+        "u3", "d.png", str(tmp_path / "d.png"), "s4", 4,
+        created_at="2026-11-08 10:00:00", media_type="picture",
+    )
+
+    mock_client = MagicMock()
+    mock_client.credential.client_id = "test_robot"
+    mock_client.get_access_token = MagicMock(return_value="mock_access_token")
+
+    pipeline = create_pipeline(
+        str(output_dir), metadata_store, mock_client, SubstringCommandMatcher()
+    )
+    replies = []
+    pipeline.reply_text = lambda text, msg: replies.append(text) or {"errcode": 0}
+
+    cb = CallbackMessage()
+    cb.data = {
+        "msgtype": "text",
+        "senderNick": "Admin",
+        "senderId": "admin",
+        "sessionWebhook": "https://webhook.mock",
+        "text": {"content": "索引统计"},
+    }
+
+    status, _ = await pipeline.process(cb)
+
+    assert status == AckMessage.STATUS_OK
+    assert len(replies) == 1
+    assert "索引总量：用户 3 人，文件 4 份（照片 2，视频 1，其他 1）。" in replies[0]
+    assert "最近新增：2026-11-08，用户 2 人，文件 2 份。" in replies[0]
+
+
 # ---------------------------------------------------------------------------
 # Storage warmup (Dispatcher entry) composition tests
 # ---------------------------------------------------------------------------

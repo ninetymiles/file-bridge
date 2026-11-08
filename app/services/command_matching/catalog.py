@@ -1,6 +1,7 @@
 """Declarative command catalog shared by both matcher implementations."""
 
 REBUILD_INDEX = "rebuild_index"
+INDEX_REPORT = "index_report"
 
 # Each command maps to a group of trigger phrases: literal substrings for the
 # substring matcher, synonym embeddings for the semantic matcher. Declaration
@@ -23,5 +24,15 @@ COMMAND_CATALOG: dict[str, tuple[str, ...]] = {
         "刷新索引",
         "刷新文件索引",
         "更新索引",
+    ),
+    INDEX_REPORT: (
+        "统计报告",
+        "生成统计报告",
+        "索引统计",
+        "统计索引",
+        "投稿统计",
+        "索引报告",
+        "分析索引",
+        "分析文件索引",
     ),
 }

@@ -3,7 +3,12 @@
 import os
 import sqlite3
 import pytest
-from app.services.metadata_store import MetadataStore
+from app.services.metadata_store import (
+    CURRENT_SCHEMA_VERSION,
+    DailyStatistics,
+    MetadataStore,
+    UnsupportedSchemaVersion,
+)
 
 
 def test_metadata_store_init(tmp_path):
@@ -25,11 +30,16 @@ def test_metadata_store_init(tmp_path):
         assert "saved_path" in columns
         assert "sha256" in columns
         assert "file_size" in columns
+        assert "media_type" in columns
 
         # Verify index exists
         cursor.execute("PRAGMA index_list(file_metadata);")
         indices = [row[1] for row in cursor.fetchall()]
         assert "idx_file_sha256" in indices
+
+        # Verify the schema version is stamped on creation
+        cursor.execute("PRAGMA user_version;")
+        assert cursor.fetchone()[0] == CURRENT_SCHEMA_VERSION
 
 
 def test_metadata_store_output_dir(tmp_path):
@@ -39,6 +49,105 @@ def test_metadata_store_output_dir(tmp_path):
     expected_db = out_dir / "metadata.sqlite"
     assert os.path.exists(expected_db)
     assert store.db_path == str(expected_db)
+
+
+def test_existing_database_without_version_is_refused(tmp_path):
+    db_file = tmp_path / "metadata.sqlite"
+    db_file.touch()
+
+    with pytest.raises(UnsupportedSchemaVersion):
+        MetadataStore(db_path=str(db_file))
+
+    with sqlite3.connect(str(db_file)) as conn:
+        assert conn.execute("PRAGMA user_version;").fetchone()[0] == 0
+        tables = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='file_metadata'"
+        ).fetchone()
+        assert tables is None
+
+
+def test_higher_database_version_is_refused(tmp_path):
+    db_file = tmp_path / "metadata.sqlite"
+    with sqlite3.connect(str(db_file)) as conn:
+        conn.execute("PRAGMA user_version = 2;")
+        conn.commit()
+
+    with pytest.raises(UnsupportedSchemaVersion):
+        MetadataStore(db_path=str(db_file))
+
+    with sqlite3.connect(str(db_file)) as conn:
+        assert conn.execute("PRAGMA user_version;").fetchone()[0] == 2
+
+
+def test_get_index_statistics(tmp_path):
+    store = MetadataStore(db_path=str(tmp_path / "metadata.sqlite"))
+
+    store.insert_record(
+        "u1", "a.jpg", str(tmp_path / "a.jpg"), "s1", 10,
+        created_at="2026-11-07 10:00:00", media_type="picture",
+    )
+    store.insert_record(
+        "u2", "b.mp4", str(tmp_path / "b.mp4"), "s2", 20,
+        created_at="2026-11-07 11:00:00", media_type="video",
+    )
+    store.insert_record(
+        "u1", "c.pdf", str(tmp_path / "c.pdf"), "s3", 30,
+        created_at="2026-11-08 09:00:00", media_type="file",
+    )
+    store.insert_record(
+        "u3", "d.png", str(tmp_path / "d.png"), "s4", 40,
+        created_at="2026-11-08 10:00:00",
+    )
+
+    stats = store.get_index_statistics()
+
+    assert stats.total_files == 4
+    assert stats.total_users == 3
+    assert stats.typed_counts == {"picture": 1, "video": 1, "file": 1}
+    assert stats.null_saved_paths == (str(tmp_path / "d.png"),)
+    assert stats.daily == (
+        DailyStatistics("2026-11-08", 2, 2),
+        DailyStatistics("2026-11-07", 2, 2),
+    )
+
+
+def test_existing_versioned_database_reopens(tmp_path):
+    db_file = tmp_path / "metadata.sqlite"
+    first = MetadataStore(db_path=str(db_file))
+    first.insert_record("u1", "a.jpg", str(tmp_path / "a.jpg"), "s1", 1, media_type="picture")
+
+    reopened = MetadataStore(db_path=str(db_file))
+    stats = reopened.get_index_statistics()
+
+    assert stats.total_files == 1
+    with sqlite3.connect(str(db_file)) as conn:
+        assert conn.execute("PRAGMA user_version;").fetchone()[0] == CURRENT_SCHEMA_VERSION
+
+
+@pytest.mark.asyncio
+async def test_async_statistics_match_sync(tmp_path):
+    store = MetadataStore(db_path=str(tmp_path / "metadata.sqlite"))
+    store.insert_record(
+        "u1", "a.jpg", str(tmp_path / "a.jpg"), "s1", 1,
+        created_at="2026-11-08 10:00:00", media_type="picture",
+    )
+
+    sync_stats = store.get_index_statistics()
+    async_stats = await store.async_get_index_statistics()
+
+    assert async_stats == sync_stats
+
+
+def test_empty_index_statistics(tmp_path):
+    store = MetadataStore(db_path=str(tmp_path / "metadata.sqlite"))
+
+    stats = store.get_index_statistics()
+
+    assert stats.total_files == 0
+    assert stats.total_users == 0
+    assert stats.typed_counts == {}
+    assert stats.null_saved_paths == ()
+    assert stats.daily == ()
 
 
 @pytest.mark.asyncio

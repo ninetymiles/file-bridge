@@ -74,11 +74,60 @@ async def test_media_file_handler_new_file(tmp_path):
     insert_kwargs = mock_store.async_insert_record.call_args[1]
     assert insert_kwargs["sender_id"] == "user_001"
     assert insert_kwargs["sender_nick"] == "Alice"
+    assert insert_kwargs["media_type"] == "file"
 
     # Verify reply
     mock_pipeline.async_reply_text.assert_not_called()
     assert "文件接收成功，已保存为:" in intent.text
     assert ".pdf" in intent.text
+
+
+@pytest.mark.asyncio
+async def test_media_file_handler_picture(tmp_path):
+    output_dir = tmp_path / "output"
+    temp_file = tmp_path / "temp_picture.tmp"
+    temp_file.write_bytes(b"image bytes")
+
+    mock_downloader = MagicMock()
+    mock_downloader.get_download_url = AsyncMock(return_value="https://example.com/dl")
+    mock_downloader.download_file_stream = AsyncMock(
+        return_value=DownloadResult(
+            temp_path=str(temp_file),
+            sha256="picture_sha256",
+            file_size=12,
+        )
+    )
+
+    mock_store = MagicMock()
+    mock_store.async_is_duplicate = AsyncMock(return_value=False)
+    mock_store.async_insert_record = AsyncMock(return_value=1)
+
+    mock_pipeline = MagicMock(spec=PipelineHandler)
+    mock_pipeline.is_draining.return_value = False
+    mock_pipeline.async_reply_text = AsyncMock()
+
+    handler = MediaFileHandler(
+        output_dir=str(output_dir),
+        metadata_store=mock_store,
+        file_downloader=mock_downloader,
+    )
+
+    raw_data = {
+        "msgtype": "picture",
+        "senderNick": "Carol",
+        "senderId": "user_002",
+        "senderStaffId": "staff-002",
+        "content": {"downloadCode": "picture_code"},
+    }
+    msg = ChatbotMessage.from_dict(raw_data)
+
+    intent = await handler.handle(msg, raw_data, mock_pipeline)
+
+    assert intent is not None
+    assert intent.tier == ReplyTier.PRIMARY
+    mock_store.async_insert_record.assert_called_once()
+    assert mock_store.async_insert_record.call_args[1]["media_type"] == "picture"
+    assert ".png" in intent.text
 
 
 @pytest.mark.asyncio
@@ -176,6 +225,7 @@ async def test_media_file_handler_video(tmp_path):
     assert intent is not None
     assert intent.tier == ReplyTier.PRIMARY
     mock_store.async_insert_record.assert_called_once()
+    assert mock_store.async_insert_record.call_args[1]["media_type"] == "video"
     mock_pipeline.async_reply_text.assert_not_called()
     assert ".mp4" in intent.text
 
@@ -221,6 +271,7 @@ async def test_rich_text_single_image(tmp_path):
     assert intent.tier == ReplyTier.PRIMARY
 
     mock_store.async_insert_record.assert_called_once()
+    assert mock_store.async_insert_record.call_args[1]["media_type"] == "picture"
     mock_pipeline.async_reply_text.assert_not_called()
     assert "文件接收成功，已保存为:" in intent.text
 

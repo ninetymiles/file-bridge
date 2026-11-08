@@ -14,6 +14,7 @@ import numpy as np
 import pytest
 
 from app.services.command_matching import (  # noqa: E402
+    INDEX_REPORT,
     REBUILD_INDEX,
     SubstringCommandMatcher,
     build_command_matcher,
@@ -49,11 +50,33 @@ async def test_substring_matches_catalog_phrases():
 
 
 @pytest.mark.asyncio
+async def test_substring_matches_index_report_phrases():
+    matcher = SubstringCommandMatcher()
+    for phrase in (
+        "统计报告",
+        "生成统计报告",
+        "索引统计",
+        "统计索引",
+        "投稿统计",
+        "索引报告",
+        "分析索引",
+        "分析文件索引",
+    ):
+        assert await matcher.match(phrase) == INDEX_REPORT
+    # Report phrasings must not steal the rebuild command.
+    assert await matcher.match("重建索引") == REBUILD_INDEX
+
+
+@pytest.mark.asyncio
 async def test_substring_rejects_unrelated_and_empty_text():
     matcher = SubstringCommandMatcher()
     assert await matcher.match("查询索引状态") is None
     assert await matcher.match("帮我索引一下这个文件") is None
     assert await matcher.match("") is None
+
+    # Inquiries are short-circuited before matching, so they never dispatch.
+    assert is_inquiry_text("统计一下有多少照片") is True
+    assert await matcher.match("统计一下有多少照片") is None
 
 
 @pytest.mark.asyncio

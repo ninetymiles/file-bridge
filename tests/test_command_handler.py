@@ -4,6 +4,7 @@ import pytest
 from unittest.mock import AsyncMock, MagicMock
 from dingtalk_stream import ChatbotMessage
 from app.handlers import CommandHandler, PipelineHandler, ReplyTier
+from app.services.command_matching import INDEX_REPORT
 from app.handlers.message import (
     CAPABILITY_VARIANTS,
     GUIDE_BODY_TEMPLATES,
@@ -52,6 +53,27 @@ async def test_command_handler_dispatches_matched_command():
     assert matcher.received_texts == ["重建索引"]
     action.assert_awaited_once_with(msg, raw_data)
     pipeline.async_reply_text.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_command_handler_dispatches_index_report():
+    matcher = FakeMatcher(INDEX_REPORT)
+    action = AsyncMock(return_value="索引报告结果")
+    handler = CommandHandler(
+        matcher=matcher, dispatch_table={INDEX_REPORT: action}
+    )
+    pipeline = MagicMock(spec=PipelineHandler)
+    pipeline.async_reply_text = AsyncMock()
+    raw_data = {"msgtype": "text", "text": {"content": "索引统计"}}
+    msg = ChatbotMessage.from_dict(raw_data)
+
+    handled = await handler.handle(msg, raw_data, pipeline)
+
+    assert handled is not None
+    assert handled.tier == ReplyTier.PRIMARY
+    assert handled.text == "索引报告结果"
+    assert matcher.received_texts == ["索引统计"]
+    action.assert_awaited_once_with(msg, raw_data)
 
 
 @pytest.mark.asyncio

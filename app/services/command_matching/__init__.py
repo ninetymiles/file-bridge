@@ -3,12 +3,13 @@
 import logging
 
 from .base import BaseCommandMatcher, is_inquiry_text, normalize_command_text
-from .catalog import COMMAND_CATALOG, REBUILD_INDEX
+from .catalog import COMMAND_CATALOG, INDEX_REPORT, REBUILD_INDEX
 from .substring import SubstringCommandMatcher
 
 __all__ = [
     "BaseCommandMatcher",
     "COMMAND_CATALOG",
+    "INDEX_REPORT",
     "REBUILD_INDEX",
     "SubstringCommandMatcher",
     "is_inquiry_text",

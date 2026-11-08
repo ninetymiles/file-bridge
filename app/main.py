@@ -9,10 +9,12 @@ import dingtalk_stream
 import dotenv
 
 from app.services.command_matching import (
+    INDEX_REPORT,
     REBUILD_INDEX,
     build_command_matcher,
     parse_enabled,
 )
+from app.services.index_report import format_index_report
 from app.services.metadata_store import MetadataStore
 from app.services.file_downloader import FileDownloader
 from app.services.lifecycle_notifier import LifecycleNotifier
@@ -193,7 +195,15 @@ def create_pipeline(
         cleaned, remaining = await metadata_store.async_rebuild_index()
         return f"索引重建完成，清理元数据 {cleaned} 条，现有有效索引 {remaining} 条。"
 
-    dispatch_table = {REBUILD_INDEX: rebuild_index}
+    async def index_report(message, raw_data) -> str:
+        command_logger.info("Received index report command")
+        stats = await metadata_store.async_get_index_statistics()
+        return format_index_report(stats)
+
+    dispatch_table = {
+        REBUILD_INDEX: rebuild_index,
+        INDEX_REPORT: index_report,
+    }
 
     pipeline = PipelineHandler(
         handlers=[

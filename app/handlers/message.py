@@ -430,6 +430,7 @@ class MediaFileHandler(BaseMessageHandler):
                 saved_path=saved_path,
                 sha256=download_result.sha256,
                 file_size=download_result.file_size,
+                media_type=msgtype,
             )
 
             saved_filename = os.path.basename(saved_path)
