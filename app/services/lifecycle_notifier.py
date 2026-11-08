@@ -86,8 +86,15 @@ class LifecycleNotifier:
             )
             return False
 
-    def _send_sync(self, title: str, content: str) -> bool:
-        """Synchronously send markdown notification to every configured target."""
+    def _send_sync(
+        self, title: str, content: str, staff_content: Optional[str] = None
+    ) -> bool:
+        """Synchronously send markdown notification to every configured target.
+
+        ``staff_content`` lets the staff target receive a different body than
+        the group target (e.g. include index stats without usage instructions).
+        When omitted, every target receives ``content``.
+        """
         if not self.is_configured:
             self.logger.debug("No notification target configured; skipping lifecycle notification.")
             return True
@@ -101,11 +108,16 @@ class LifecycleNotifier:
 
         all_succeeded = True
         for kind, target_id in self._build_targets():
-            if not self._send_to_target(handler, kind, target_id, title, content):
+            target_content = content
+            if kind == self.TARGET_KIND_STAFF and staff_content is not None:
+                target_content = staff_content
+            if not self._send_to_target(handler, kind, target_id, title, target_content):
                 all_succeeded = False
         return all_succeeded
 
-    async def send_notification(self, title: str, content: str) -> bool:
+    async def send_notification(
+        self, title: str, content: str, staff_content: Optional[str] = None
+    ) -> bool:
         """Send notification asynchronously in a thread pool with timeout protection."""
         if not self.is_configured:
             self.logger.debug("No notification target configured; skipping lifecycle notification.")
@@ -113,7 +125,7 @@ class LifecycleNotifier:
 
         try:
             return await asyncio.wait_for(
-                asyncio.to_thread(self._send_sync, title, content),
+                asyncio.to_thread(self._send_sync, title, content, staff_content),
                 timeout=self.timeout,
             )
         except asyncio.TimeoutError:
@@ -123,11 +135,54 @@ class LifecycleNotifier:
             self.logger.warning("Unexpected error sending lifecycle notification (%s): %s", title, e)
             return False
 
-    async def send_online_notification(self) -> bool:
-        """Send service online notification."""
+    async def send_to_staff(self, title: str, content: str) -> bool:
+        """Send a markdown notification to the staff target only.
+
+        Unlike :meth:`send_notification`, this never reaches the group chat,
+        so automated reports do not disturb group members. When
+        ``notify_staff_id`` is not configured the call is a silent no-op
+        that returns ``True``.
+        """
+        if not self.notify_staff_id:
+            self.logger.debug("No staff target configured; skipping staff-only notification.")
+            return True
+
+        if not self.dingtalk_client:
+            self.logger.warning("DingTalk client is not provided; skipping staff-only notification.")
+            return False
+
+        try:
+            return await asyncio.wait_for(
+                asyncio.to_thread(
+                    self._send_to_staff_sync, title, content
+                ),
+                timeout=self.timeout,
+            )
+        except asyncio.TimeoutError:
+            self.logger.warning("Timeout (%ss) sending staff notification: %s", self.timeout, title)
+            return False
+        except Exception as e:
+            self.logger.warning("Unexpected error sending staff notification (%s): %s", title, e)
+            return False
+
+    def _send_to_staff_sync(self, title: str, content: str) -> bool:
+        """Synchronously send a markdown notification to the staff target."""
+        handler = dingtalk_stream.ChatbotHandler()
+        handler.dingtalk_client = self.dingtalk_client
+        return self._send_to_target(
+            handler, self.TARGET_KIND_STAFF, self.notify_staff_id, title, content
+        )
+
+    async def send_online_notification(self, staff_snapshot: Optional[str] = None) -> bool:
+        """Send service online notification.
+
+        The group target gets usage instructions; the staff target gets the
+        supplied index snapshot instead (falls back to the group body when
+        no snapshot is provided).
+        """
         title = "🤖 File Bridge 机器人已上线"
         content = "服务已就绪，可以随时在群聊中@机器人 发送视频和照片，或直接私聊机器人发送视频照片。"
-        return await self.send_notification(title, content)
+        return await self.send_notification(title, content, staff_content=staff_snapshot)
 
     async def send_offline_notification(self) -> bool:
         """Send service offline notification."""

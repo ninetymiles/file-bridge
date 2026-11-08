@@ -17,6 +17,7 @@ from app.services.lifecycle_notifier import LifecycleNotifier
 
 if TYPE_CHECKING:
     from app.handlers import PipelineHandler
+    from app.services.daily_report_scheduler import DailyReportScheduler
 
 
 class BotService:
@@ -42,10 +43,14 @@ class BotService:
         notifier: Optional[LifecycleNotifier] = None,
         logger: Optional[logging.Logger] = None,
         pipeline: Optional["PipelineHandler"] = None,
+        scheduler: Optional["DailyReportScheduler"] = None,
+        startup_staff_snapshot: Optional[str] = None,
     ):
         self.client = client
         self.notifier = notifier
         self.pipeline = pipeline
+        self.scheduler = scheduler
+        self.startup_staff_snapshot = startup_staff_snapshot
         self.logger = logger or logging.getLogger("file-bridge.runner")
         self._stop_event: Optional[asyncio.Event] = None
         self._runner_task: Optional[asyncio.Task] = None
@@ -73,13 +78,18 @@ class BotService:
 
         # Send online notification if notifier is configured (blocking is fine
         # at startup; only offline notification needs to be fire-and-forget).
+        # The staff target receives the index snapshot instead of usage text.
         if self.notifier:
-            await self.notifier.send_online_notification()
+            await self.notifier.send_online_notification(self.startup_staff_snapshot)
 
         # Launch the SDK client in a background task so the event loop can
         # serve signal handlers and the stop event wait concurrently.
         self.logger.info("Starting DingTalk stream client runner...")
         self._runner_task = asyncio.create_task(self.client.start())
+
+        # Start the daily report scheduler alongside the SDK runner.
+        if self.scheduler:
+            self.scheduler.start()
 
     async def stop(self) -> None:
         """Idempotent stop: run the graceful shutdown sequence.
@@ -111,6 +121,11 @@ class BotService:
         self._is_stopped = True
 
         self.logger.info("Executing graceful shutdown sequence...")
+
+        # Stop the daily report scheduler first so no new check starts
+        # during shutdown.
+        if self.scheduler:
+            self.scheduler.stop()
 
         # 1. Gate + drain: stop accepting new messages, then settle in-flight
         #    ones before touching the websocket. Keeps the ws open on purpose:

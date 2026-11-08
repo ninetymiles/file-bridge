@@ -299,8 +299,7 @@ async def test_index_report_command_returns_totals_and_latest_day(tmp_path):
 
     assert status == AckMessage.STATUS_OK
     assert len(replies) == 1
-    assert "索引总量：用户 3 人，文件 4 份（照片 2，视频 1，其他 1）。" in replies[0]
-    assert "最近新增：2026-11-08，用户 2 人，文件 2 份。" in replies[0]
+    assert "当前索引总量：3 位用户上传 4 份文件 (照片 2，视频 1，其他 1)" in replies[0]
 
 
 # ---------------------------------------------------------------------------

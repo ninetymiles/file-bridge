@@ -150,6 +150,65 @@ def test_empty_index_statistics(tmp_path):
     assert stats.daily == ()
 
 
+def test_count_new_since(tmp_path):
+    store = MetadataStore(db_path=str(tmp_path / "metadata.sqlite"))
+
+    store.insert_record(
+        "u1", "a.jpg", str(tmp_path / "a.jpg"), "s1", 10,
+        created_at="2026-11-07 10:00:00", media_type="picture",
+    )
+    store.insert_record(
+        "u2", "b.mp4", str(tmp_path / "b.mp4"), "s2", 20,
+        created_at="2026-11-07 11:00:00", media_type="video",
+    )
+    store.insert_record(
+        "u1", "c.pdf", str(tmp_path / "c.pdf"), "s3", 30,
+        created_at="2026-11-08 09:00:00", media_type="file",
+    )
+    store.insert_record(
+        "u3", "d.png", str(tmp_path / "d.png"), "s4", 40,
+        created_at="2026-11-08 10:00:00",
+    )
+
+    # Records after 2026-11-08 00:00:00: c.pdf (file), d.png (null -> picture)
+    stats = store.count_new_since("2026-11-08 00:00:00")
+
+    assert stats.total_files == 2
+    assert stats.total_users == 2
+    assert stats.typed_counts == {"file": 1}
+    assert stats.null_saved_paths == (str(tmp_path / "d.png"),)
+    assert stats.daily == ()
+
+
+def test_count_new_since_no_matches(tmp_path):
+    store = MetadataStore(db_path=str(tmp_path / "metadata.sqlite"))
+    store.insert_record(
+        "u1", "a.jpg", str(tmp_path / "a.jpg"), "s1", 10,
+        created_at="2026-11-07 10:00:00", media_type="picture",
+    )
+
+    stats = store.count_new_since("2026-11-08 00:00:00")
+
+    assert stats.total_files == 0
+    assert stats.total_users == 0
+    assert stats.typed_counts == {}
+    assert stats.null_saved_paths == ()
+
+
+@pytest.mark.asyncio
+async def test_async_count_new_since_matches_sync(tmp_path):
+    store = MetadataStore(db_path=str(tmp_path / "metadata.sqlite"))
+    store.insert_record(
+        "u1", "a.jpg", str(tmp_path / "a.jpg"), "s1", 10,
+        created_at="2026-11-08 10:00:00", media_type="picture",
+    )
+
+    sync_stats = store.count_new_since("2026-11-08 00:00:00")
+    async_stats = await store.async_count_new_since("2026-11-08 00:00:00")
+
+    assert async_stats == sync_stats
+
+
 @pytest.mark.asyncio
 async def test_duplicate_detection(tmp_path):
     db_file = tmp_path / "metadata.sqlite"

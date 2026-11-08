@@ -263,3 +263,53 @@ class MetadataStore:
     async def async_get_index_statistics(self) -> IndexStatistics:
         """Asynchronously aggregate report facts."""
         return await asyncio.to_thread(self.get_index_statistics)
+
+    def count_new_since(self, last_check_str: str) -> IndexStatistics:
+        """Aggregate statistics for records created after the given timestamp.
+
+        The ``created_at`` column stores ``'%Y-%m-%d %H:%M:%S'`` strings,
+        which sort lexicographically, so a plain ``>`` comparison is correct.
+        Returns an :class:`IndexStatistics` with ``daily`` left empty; the
+        report renderer only consumes the totals and typed counts.
+        """
+        with self.get_connection() as conn:
+            total_files = conn.execute(
+                "SELECT COUNT(*) FROM file_metadata WHERE created_at > ?",
+                (last_check_str,),
+            ).fetchone()[0]
+            total_users = conn.execute(
+                "SELECT COUNT(DISTINCT sender_id) FROM file_metadata WHERE created_at > ?",
+                (last_check_str,),
+            ).fetchone()[0]
+            typed_counts = {
+                row["media_type"]: row["count"]
+                for row in conn.execute(
+                    """
+                    SELECT media_type, COUNT(*) AS count
+                    FROM file_metadata
+                    WHERE media_type IS NOT NULL AND created_at > ?
+                    GROUP BY media_type
+                    """,
+                    (last_check_str,),
+                )
+            }
+            null_saved_paths = tuple(
+                row["saved_path"]
+                for row in conn.execute(
+                    "SELECT saved_path FROM file_metadata "
+                    "WHERE media_type IS NULL AND created_at > ?",
+                    (last_check_str,),
+                )
+            )
+
+        return IndexStatistics(
+            total_files=total_files,
+            total_users=total_users,
+            typed_counts=typed_counts,
+            null_saved_paths=null_saved_paths,
+            daily=(),
+        )
+
+    async def async_count_new_since(self, last_check_str: str) -> IndexStatistics:
+        """Asynchronously aggregate statistics for records after a timestamp."""
+        return await asyncio.to_thread(self.count_new_since, last_check_str)

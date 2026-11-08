@@ -1,6 +1,7 @@
 """Render index statistics as chat report text."""
 
 import os
+from datetime import datetime
 
 from app.services.metadata_store import IndexStatistics
 
@@ -38,23 +39,38 @@ def _type_counts(stats: IndexStatistics) -> tuple[int, int, int]:
     return photo_count, video_count, other_count
 
 
-def format_index_report(stats: IndexStatistics) -> str:
-    """Format the statistics report, collapsing totals when only one day exists."""
-    if not stats.daily:
+def format_index_snapshot(stats: IndexStatistics) -> str:
+    """Format a single-line total snapshot of the current index.
+
+    Used by the manual report command, the startup snapshot, and the
+    total line of the daily delta report. Returns :data:`EMPTY_REPORT_TEXT`
+    when the index has no records.
+    """
+    if stats.total_files == 0:
         return EMPTY_REPORT_TEXT
 
     photo_count, video_count, other_count = _type_counts(stats)
-    breakdown = f"照片 {photo_count}，视频 {video_count}，其他 {other_count}"
-    latest = stats.daily[0]
-
-    if len(stats.daily) == 1:
-        return (
-            f"索引统计：{latest.day}，用户 {latest.users} 人，文件 {latest.files} 份"
-            f"（{breakdown}）。"
-        )
-
     return (
-        f"索引总量：用户 {stats.total_users} 人，文件 {stats.total_files} 份"
-        f"（{breakdown}）。\n"
-        f"最近新增：{latest.day}，用户 {latest.users} 人，文件 {latest.files} 份。"
+        f"当前索引总量：{stats.total_users} 位用户上传 {stats.total_files} 份文件 "
+        f"(照片 {photo_count}，视频 {video_count}，其他 {other_count})"
     )
+
+
+def format_daily_delta(delta_stats: IndexStatistics, last_check: datetime) -> str:
+    """Format the daily incremental report line.
+
+    ``delta_stats`` is the aggregation of records created after
+    ``last_check``; ``last_check`` is rendered to minute precision.
+    """
+    photo_count, video_count, other_count = _type_counts(delta_stats)
+    since = last_check.strftime("%Y-%m-%d %H:%M")
+    return (
+        f"自{since} 新增：{delta_stats.total_users} 位用户上传 "
+        f"{delta_stats.total_files} 份文件 "
+        f"(照片 {photo_count}，视频 {video_count}，其他 {other_count})"
+    )
+
+
+# Backward-compatible alias retained for callers that still import the old
+# name; the manual command handler is updated to use format_index_snapshot.
+format_index_report = format_index_snapshot

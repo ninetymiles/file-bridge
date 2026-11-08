@@ -156,3 +156,105 @@ async def test_notification_timeout_handled():
     with patch.object(notifier, "_send_sync", side_effect=slow_send):
         result = await notifier.send_online_notification()
         assert result is False
+
+
+@pytest.mark.asyncio
+async def test_send_to_staff_only_targets_staff():
+    client = MagicMock()
+    notifier = LifecycleNotifier(
+        dingtalk_client=client,
+        notify_conversation_id="cid_group_123",
+        notify_staff_id="staff_456",
+    )
+
+    with patch("dingtalk_stream.ChatbotHandler") as MockHandler, \
+            patch("dingtalk_stream.reply_specified_group_chat") as mock_group, \
+            patch("dingtalk_stream.reply_specified_single_chat") as mock_staff:
+        mock_handler_inst = MockHandler.return_value
+        mock_handler_inst.reply_markdown_card.return_value = MagicMock(card_instance_id="card-1")
+
+        result = await notifier.send_to_staff("title", "content")
+
+        assert result is True
+        mock_group.assert_not_called()
+        mock_staff.assert_called_once_with("staff_456")
+        mock_handler_inst.reply_markdown_card.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_send_to_staff_unconfigured_is_silent_noop():
+    notifier = LifecycleNotifier(
+        dingtalk_client=MagicMock(),
+        notify_conversation_id="cid_group_123",
+        notify_staff_id=None,
+    )
+
+    with patch("dingtalk_stream.ChatbotHandler") as MockHandler:
+        result = await notifier.send_to_staff("title", "content")
+
+        assert result is True
+        MockHandler.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_send_to_staff_without_client_returns_false():
+    notifier = LifecycleNotifier(
+        dingtalk_client=None,
+        notify_staff_id="staff_456",
+    )
+
+    result = await notifier.send_to_staff("title", "content")
+
+    assert result is False
+
+
+@pytest.mark.asyncio
+async def test_online_notification_staff_gets_snapshot_group_gets_usage():
+    client = MagicMock()
+    notifier = LifecycleNotifier(
+        dingtalk_client=client,
+        notify_conversation_id="cid_group_123",
+        notify_staff_id="staff_456",
+    )
+    snapshot = "当前索引总量：1 位用户上传 1 份文件 (照片 1，视频 0，其他 0)"
+
+    with patch("dingtalk_stream.ChatbotHandler") as MockHandler:
+        mock_handler_inst = MockHandler.return_value
+        mock_handler_inst.reply_markdown_card.return_value = MagicMock(
+            card_instance_id="card-1"
+        )
+
+        result = await notifier.send_online_notification(snapshot)
+
+        assert result is True
+        calls = mock_handler_inst.reply_markdown_card.call_args_list
+        assert len(calls) == 2
+        # Group (first) keeps usage instructions; staff (second) gets snapshot.
+        assert "服务已就绪" in calls[0].args[0]
+        assert calls[1].args[0] == snapshot
+        # Title is shared by both targets.
+        assert calls[0].kwargs["title"] == "🤖 File Bridge 机器人已上线"
+        assert calls[1].kwargs["title"] == "🤖 File Bridge 机器人已上线"
+
+
+@pytest.mark.asyncio
+async def test_online_notification_without_snapshot_shares_group_content():
+    client = MagicMock()
+    notifier = LifecycleNotifier(
+        dingtalk_client=client,
+        notify_conversation_id="cid_group_123",
+        notify_staff_id="staff_456",
+    )
+
+    with patch("dingtalk_stream.ChatbotHandler") as MockHandler:
+        mock_handler_inst = MockHandler.return_value
+        mock_handler_inst.reply_markdown_card.return_value = MagicMock(
+            card_instance_id="card-1"
+        )
+
+        result = await notifier.send_online_notification()
+
+        assert result is True
+        calls = mock_handler_inst.reply_markdown_card.call_args_list
+        assert len(calls) == 2
+        assert calls[0].args[0] == calls[1].args[0]

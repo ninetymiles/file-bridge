@@ -14,7 +14,8 @@ from app.services.command_matching import (
     build_command_matcher,
     parse_enabled,
 )
-from app.services.index_report import format_index_report
+from app.services.daily_report_scheduler import DailyReportScheduler
+from app.services.index_report import format_index_snapshot
 from app.services.metadata_store import MetadataStore
 from app.services.file_downloader import FileDownloader
 from app.services.lifecycle_notifier import LifecycleNotifier
@@ -198,7 +199,7 @@ def create_pipeline(
     async def index_report(message, raw_data) -> str:
         command_logger.info("Received index report command")
         stats = await metadata_store.async_get_index_statistics()
-        return format_index_report(stats)
+        return format_index_snapshot(stats)
 
     dispatch_table = {
         REBUILD_INDEX: rebuild_index,
@@ -229,6 +230,11 @@ def run_startup_index_check(metadata_store: MetadataStore, logger: logging.Logge
     """Startup phase: reconcile the index against disk and log the counts."""
     cleaned, remaining = metadata_store.rebuild_index()
     logger.info("Index rebuilt: cleaned %d records, %d records remain", cleaned, remaining)
+
+
+def build_startup_staff_snapshot(metadata_store: MetadataStore) -> str:
+    """Render the index snapshot delivered to the staff target on startup."""
+    return format_index_snapshot(metadata_store.get_index_statistics())
 
 
 def log_startup_summary(config: argparse.Namespace, logger: logging.Logger) -> None:
@@ -287,7 +293,20 @@ def main(args=None):
         notify_staff_id=config.notify_staff_id,
         logger=logger,
     )
-    runner = BotService(client=client, notifier=notifier, logger=logger, pipeline=pipeline)
+
+    # Startup snapshot to staff (no-op when NOTIFY_STAFF_ID is unset). It is
+    # delivered through the online notification so staff receives one message.
+    startup_staff_snapshot = build_startup_staff_snapshot(metadata_store)
+
+    scheduler = DailyReportScheduler(
+        metadata_store=metadata_store,
+        notifier=notifier,
+        logger=logger,
+    )
+    runner = BotService(
+        client=client, notifier=notifier, logger=logger, pipeline=pipeline,
+        scheduler=scheduler, startup_staff_snapshot=startup_staff_snapshot,
+    )
     runner.run_forever()
 
 

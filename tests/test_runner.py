@@ -211,6 +211,27 @@ async def test_start_is_idempotent():
 
 
 @pytest.mark.asyncio
+async def test_start_passes_startup_staff_snapshot_to_online_notification():
+    client = MagicMock()
+    client.start = AsyncMock()
+    client.websocket = None
+
+    notifier = MagicMock()
+    notifier.send_online_notification = AsyncMock(return_value=True)
+
+    service = BotService(
+        client=client,
+        notifier=notifier,
+        logger=MagicMock(),
+        startup_staff_snapshot="snapshot text",
+    )
+
+    await service.start()
+
+    notifier.send_online_notification.assert_awaited_once_with("snapshot text")
+
+
+@pytest.mark.asyncio
 async def test_stop_is_idempotent():
     """Spec: BotService.stop() called again after a successful stop returns
     immediately without re-running the shutdown sequence."""
@@ -233,3 +254,20 @@ async def test_stop_is_idempotent():
     # Second call must be a no-op (no direct SDK stop, ever)
     await service.stop()
     client.stop.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_scheduler_started_on_start_and_stopped_on_stop():
+    client = MagicMock()
+    client.start = AsyncMock()
+    client.websocket = None
+
+    scheduler = MagicMock()
+    service = BotService(client=client, logger=MagicMock(), scheduler=scheduler)
+
+    await service.start()
+    scheduler.start.assert_called_once()
+
+    service.request_stop("SIGINT")
+    await service.stop()
+    scheduler.stop.assert_called_once()
