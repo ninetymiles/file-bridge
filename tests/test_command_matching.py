@@ -47,6 +47,8 @@ async def test_substring_matches_catalog_phrases():
     assert await matcher.match("刷新索引") == REBUILD_INDEX
     assert await matcher.match("刷新文件索引") == REBUILD_INDEX
     assert await matcher.match("更新索引") == REBUILD_INDEX
+    assert await matcher.match("清理索引") == REBUILD_INDEX
+    assert await matcher.match("帮我清理索引") == REBUILD_INDEX
 
 
 @pytest.mark.asyncio

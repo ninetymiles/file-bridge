@@ -24,6 +24,7 @@ COMMAND_CATALOG: dict[str, tuple[str, ...]] = {
         "刷新索引",
         "刷新文件索引",
         "更新索引",
+        "清理索引",
     ),
     INDEX_REPORT: (
         "统计报告",

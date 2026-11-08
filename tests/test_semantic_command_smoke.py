@@ -38,6 +38,10 @@ POSITIVE_SAMPLES = [
     "刷新索引",
     "刷新文件索引",
     "更新索引",
+    # Cleanup phrasings: the command purges records of missing files.
+    "清理索引",
+    "索引清理",
+    "清理一下索引",
 ]
 
 # Report phrasings must route to the report command, not to rebuild.
