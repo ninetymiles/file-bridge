@@ -87,6 +87,7 @@ class MetadataStore:
                 CREATE TABLE file_metadata (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     sender_id TEXT NOT NULL,
+                    sender_staff_id TEXT,
                     sender_nick TEXT,
                     created_at TEXT NOT NULL,
                     original_filename TEXT NOT NULL,
@@ -114,6 +115,7 @@ class MetadataStore:
         sender_nick: Optional[str] = None,
         created_at: Optional[str] = None,
         media_type: Optional[str] = None,
+        sender_staff_id: Optional[str] = None,
     ) -> int:
         """Insert a file metadata record into SQLite."""
         if created_at is None:
@@ -125,10 +127,10 @@ class MetadataStore:
             cursor.execute(
                 """
                 INSERT INTO file_metadata (
-                    sender_id, sender_nick, created_at, original_filename, saved_path, sha256, file_size, media_type
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    sender_id, sender_staff_id, sender_nick, created_at, original_filename, saved_path, sha256, file_size, media_type
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (sender_id, sender_nick, created_at, original_filename, saved_path, sha256, file_size, media_type),
+                (sender_id, sender_staff_id, sender_nick, created_at, original_filename, saved_path, sha256, file_size, media_type),
             )
             conn.commit()
             return cursor.lastrowid
@@ -143,6 +145,7 @@ class MetadataStore:
         sender_nick: Optional[str] = None,
         created_at: Optional[str] = None,
         media_type: Optional[str] = None,
+        sender_staff_id: Optional[str] = None,
     ) -> int:
         """Asynchronously insert a file metadata record into SQLite."""
         return await asyncio.to_thread(
@@ -155,6 +158,7 @@ class MetadataStore:
             sender_nick,
             created_at,
             media_type,
+            sender_staff_id,
         )
 
     def is_duplicate(self, sha256: str) -> bool:

@@ -72,10 +72,10 @@ def generate_saved_filename(
     clean_ext = sanitize_extension(original_filename, default_ext=default_ext)
 
     ts = timestamp or datetime.now()
-    # Format timestamp with milliseconds: YYYYMMDD_HHMMSS_fff
-    time_str = ts.strftime("%Y%m%d_%H%M%S_%f")[:19]
+    # Format timestamp without milliseconds: YYYYMMDD_HHMMSS
+    time_str = ts.strftime("%Y%m%d_%H%M%S")
 
-    sender_suffix = f"_{clean_sender_id}" if clean_sender_id else ""
+    sender_suffix = f"_{clean_sender_id[-4:]}" if clean_sender_id else ""
     return f"{time_str}{sender_suffix}{clean_ext}"
 
 
@@ -95,7 +95,7 @@ def save_file(
     )
     target_path = os.path.join(output_dir, filename)
 
-    # Collision prevention if exact millisecond collision occurs
+    # Collision prevention if exact second collision occurs
     counter = 1
     base_name, ext = os.path.splitext(target_path)
     while os.path.exists(target_path):

@@ -24,6 +24,7 @@ def test_metadata_store_init(tmp_path):
         columns = {row[1]: row[2] for row in cursor.fetchall()}
         assert "id" in columns
         assert "sender_id" in columns
+        assert "sender_staff_id" in columns
         assert "sender_nick" in columns
         assert "created_at" in columns
         assert "original_filename" in columns
@@ -122,6 +123,40 @@ def test_existing_versioned_database_reopens(tmp_path):
     assert stats.total_files == 1
     with sqlite3.connect(str(db_file)) as conn:
         assert conn.execute("PRAGMA user_version;").fetchone()[0] == CURRENT_SCHEMA_VERSION
+
+
+def test_sender_staff_id_stored_verbatim(tmp_path):
+    store = MetadataStore(db_path=str(tmp_path / "metadata.sqlite"))
+    store.insert_record(
+        "sender_encrypted", "a.jpg", str(tmp_path / "a.jpg"), "s1", 10,
+        media_type="picture", sender_staff_id="1234567890123456",
+    )
+    store.insert_record(
+        "unknown", "b.jpg", str(tmp_path / "b.jpg"), "s2", 20,
+        media_type="picture",
+    )
+
+    with sqlite3.connect(store.db_path) as conn:
+        rows = conn.execute(
+            "SELECT sender_id, sender_staff_id FROM file_metadata ORDER BY id"
+        ).fetchall()
+
+    assert rows[0] == ("sender_encrypted", "1234567890123456")
+    assert rows[1] == ("unknown", None)
+
+
+@pytest.mark.asyncio
+async def test_async_insert_persists_sender_staff_id(tmp_path):
+    store = MetadataStore(db_path=str(tmp_path / "metadata.sqlite"))
+    await store.async_insert_record(
+        "sender_encrypted", "a.jpg", str(tmp_path / "a.jpg"), "s1", 10,
+        sender_staff_id="manager4521",
+    )
+
+    with sqlite3.connect(store.db_path) as conn:
+        assert conn.execute(
+            "SELECT sender_staff_id FROM file_metadata"
+        ).fetchone()[0] == "manager4521"
 
 
 @pytest.mark.asyncio

@@ -60,7 +60,7 @@
 
 #### Scenario: 群聊 text 消息 @ 前缀被平台剥离
 - **WHEN** 用户在群聊中发送 "@机器人 hello"（@ 在开头）
-- **THEN** 回调消息 `text.content` 为 `" hello"`（前导空格，`@机器人名` 已被平台移除），且 `isInAtList=true`、`atUsers` 包含机器人 `dingtalkId`：
+- **THEN** 回调消息 `text.content` 为 `" hello"`（前导空格，`@机器人名` 已被平台移除），且 `isInAtList=true`、`atUsers` 包含机器人 `dingtalkId`，发送者三字段同样存在：
   ```json
   {
     "conversationType": "2",
@@ -68,7 +68,11 @@
     "text": { "content": " hello" },
     "isInAtList": true,
     "atUsers": [{ "dingtalkId": "<chatbot_user_id>" }],
-    "chatbotUserId": "<chatbot_user_id>"
+    "chatbotUserId": "<chatbot_user_id>",
+    "conversationTitle": "<group_title>",
+    "senderNick": "<nick>",
+    "senderStaffId": "<staff_id>",
+    "senderId": "<sender_id>"
   }
   ```
 
@@ -99,22 +103,31 @@
   ```
 
 #### Scenario: 群聊 richText 消息结构（@ 在段尾）
-- **WHEN** 用户先选图再 @ 机器人，发送 "[图1] @机器人"
-- **THEN** `content.richText` 中 @ 提及段位于列表末尾：
+- **WHEN** 群聊中用户先选两张图再 @ 机器人发送 "[图1] [图2] @机器人"（Android 端实测，5 段）
+- **THEN** `content.richText` 为「图片段 + 换行段」交替、尾部为 @ 提及段，且携带完整发送者三字段：
   ```json
   {
     "conversationType": "2",
     "msgtype": "richText",
+    "isInAtList": true,
+    "atUsers": [{ "dingtalkId": "<chatbot_user_id>" }],
+    "chatbotUserId": "<chatbot_user_id>",
+    "conversationTitle": "<group_title>",
+    "senderNick": "<nick>",
+    "senderStaffId": "<staff_id>",
+    "senderId": "<sender_id>",
     "content": {
       "richText": [
-        { "type": "picture", "downloadCode": "<download_code>" },
+        { "type": "picture", "downloadCode": "<download_code>", "pictureDownloadCode": "<picture_download_code>" },
         { "text": "\n" },
-        { "text": "@FileBridge" }
+        { "type": "picture", "downloadCode": "<download_code>", "pictureDownloadCode": "<picture_download_code>" },
+        { "text": "\n" },
+        { "text": "@机器人" }
       ]
     }
   }
   ```
-  @ 提及在 `richText` 中始终以独立 text 段形式存在，位置不固定（可在段首或段尾，由用户发送消息时的编辑决定）。
+  @ 提及在 `richText` 中始终以独立 text 段形式存在，位置不固定（可在段首或段尾，由用户发送消息时的编辑决定）。系统日志中出现的 `<img1>`、`<img2>` 是合并时生成的占位符（见「richText 文本语义合并与命令解析」），不属于平台原始负载。
 
 #### Scenario: 单聊 richText 多图消息结构
 - **WHEN** 用户在单聊中将多张图片加入输入框后发送
@@ -153,17 +166,21 @@
 
 #### Scenario: 单聊多图直接发送拆分为多条 picture 消息
 - **WHEN** 用户在单聊中直接选择多张图片发送（不经过输入框）
-- **THEN** 平台将多张图片拆分为多条独立的 `picture` 消息回调，每条消息仅含一张图片的 `downloadCode`：
+- **THEN** 平台将多张图片拆分为多条独立的 `picture` 消息回调，每条消息仅含一张图片的 `downloadCode`，并携带发送者三字段：
   ```json
   {
     "conversationType": "1",
     "msgtype": "picture",
+    "senderNick": "<nick>",
+    "senderStaffId": "<staff_id>",
+    "senderId": "<sender_id>",
     "content": {
       "downloadCode": "<download_code>",
       "pictureDownloadCode": "<picture_download_code>"
     }
   }
   ```
+  单聊 `picture` 消息无 `atUsers`、无 `isInAtList` 字段。
 
 #### Scenario: 单聊 video 消息结构
 - **WHEN** 用户在单聊中发送一条视频（Android 端实测）
@@ -195,6 +212,18 @@
 #### Scenario: 群聊 atUsers 标识机器人被 @
 - **WHEN** 群聊消息（`text` 或 `richText`）到达回调入口
 - **THEN** 若机器人被 @，`atUsers` 数组中包含 `{"dingtalkId": "<chatbot_user_id>"}`，且该 `dingtalkId` 与 `chatbotUserId` 字段值一致；`isInAtList` 为 `true`
+
+#### Scenario: 发送者字段在实测消息中均存在
+- **WHEN** 系统接收本次实测覆盖的四类消息：单聊 `text`、单聊 `picture`、群聊 `text`、群聊 `richText`
+- **THEN** `senderNick`、`senderStaffId`、`senderId` 三个字段均存在，无缺失；实现 MUST NOT 假设任一字段必然存在，元数据入库的 `sender_id` 按 `senderId -> unknown` 处理，MUST NOT 回退写入 `senderStaffId`。
+
+#### Scenario: 发送者字段取值形态与跨会话稳定性
+- **WHEN** 系统解析同一发送者在单聊与群聊中发出的消息
+- **THEN** 三个字段的取值形态为：`senderNick` 为中文昵称；`senderStaffId` 在企业内唯一，测试环境为短字母数字串（实测 11 字符，形如 `managerNNNN`），生产环境为 16 位数字；`senderId` 为 `$:LWCP_v1:$` 前缀的加密串（本次实测 43 字符：11 字符前缀 + 32 字符主体），长度 MUST NOT 写死。同一用户在同一环境下，跨单聊/群聊、跨 `text`/`picture`/`richText` 的 `senderId` 与 `senderStaffId` 取值相同，可直接用于用户维度的去重统计。
+
+#### Scenario: 发送者标识的三个消费位置互不替代
+- **WHEN** 系统处理一条携带文件的消息并回复发送者
+- **THEN** 三个消费位置各自取值，MUST NOT 交叉复用：落盘文件名使用 `senderStaffId` 的末 4 位（见 `file-storage`）；元数据 `sender_id` 列使用 `senderId`、`sender_staff_id` 列使用完整原始 `senderStaffId`（见 `file-indexing`）；回复路由使用消息自带的 `sessionWebhook`，回复的 `atUserIds` 使用完整原始 `senderStaffId`。回复 `atUserIds` MUST NOT 使用文件名截断值，否则 @ 提及会失效。
 
 ### Requirement: richText 图片提取与逐张处理
 系统 SHALL 从 `richText` 消息的 `content.richText` 列表中提取全部包含 `downloadCode` 的图片段，对每张图片独立执行既有的换取下载链接、流式下载、SHA-256 去重、落盘保存与元数据入库流程，并在处理完成后通过一条回复向发送者汇总每张图片的保存成功或重复结果。对于保存成功的图片，回复中文件名下方 SHALL 追加一行该图片的元数据摘要（由 `media-metadata` 能力提供）；当图片无可用元数据时不追加该行。单张图片处理失败 MUST NOT 中断同一消息中其余图片的处理。图片处理完成后，消息 SHALL 继续流转至后续处理器。

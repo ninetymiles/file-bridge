@@ -413,7 +413,8 @@ class MediaFileHandler(BaseMessageHandler):
                 return _ImageProcessResult("duplicate", "文件已存在，请勿重复发送")
 
             sender_nick = message.sender_nick or raw_data.get("senderNick")
-            sender_id = message.sender_id or raw_data.get("senderId") or message.sender_staff_id or "unknown"
+            sender_id = message.sender_id or raw_data.get("senderId") or "unknown"
+            sender_staff_id = message.sender_staff_id or raw_data.get("senderStaffId")
 
             saved_path = save_file(
                 temp_path=download_result.temp_path,
@@ -431,6 +432,7 @@ class MediaFileHandler(BaseMessageHandler):
                 sha256=download_result.sha256,
                 file_size=download_result.file_size,
                 media_type=msgtype,
+                sender_staff_id=sender_staff_id,
             )
 
             saved_filename = os.path.basename(saved_path)

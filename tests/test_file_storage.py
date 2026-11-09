@@ -38,7 +38,47 @@ def test_generate_saved_filename():
         original_filename="document.pdf",
         timestamp=fixed_time,
     )
-    assert filename == "20260924_153045_123_staff-001.pdf"
+    assert filename == "20260924_153045_-001.pdf"
+
+
+def test_generate_saved_filename_truncates_to_last_four_chars():
+    fixed_time = datetime(2026, 9, 24, 15, 30, 45, 123456)
+
+    long_id = generate_saved_filename(
+        sender_staff_id="1234567890123456",
+        original_filename="document.pdf",
+        timestamp=fixed_time,
+    )
+    assert long_id == "20260924_153045_3456.pdf"
+
+    short_id = generate_saved_filename(
+        sender_staff_id="manager4521",
+        original_filename="document.pdf",
+        timestamp=fixed_time,
+    )
+    assert short_id == "20260924_153045_4521.pdf"
+
+
+def test_generate_saved_filename_keeps_ids_shorter_than_four_chars():
+    fixed_time = datetime(2026, 9, 24, 15, 30, 45, 123456)
+    filename = generate_saved_filename(
+        sender_staff_id="abc",
+        original_filename="document.pdf",
+        timestamp=fixed_time,
+    )
+    assert filename == "20260924_153045_abc.pdf"
+
+
+def test_generate_saved_filename_truncates_after_sanitizing():
+    fixed_time = datetime(2026, 9, 24, 15, 30, 45, 123456)
+    # Trailing space is stripped before slicing, so the suffix keeps four
+    # real characters instead of fewer plus a trailing blank.
+    filename = generate_saved_filename(
+        sender_staff_id="abc def ",
+        original_filename="document.pdf",
+        timestamp=fixed_time,
+    )
+    assert filename == "20260924_153045_ def.pdf"
 
 
 def test_generate_saved_filename_without_sender_id():
@@ -48,7 +88,17 @@ def test_generate_saved_filename_without_sender_id():
         original_filename="document.pdf",
         timestamp=fixed_time,
     )
-    assert filename == "20260924_153045_123.pdf"
+    assert filename == "20260924_153045.pdf"
+
+
+def test_generate_saved_filename_with_empty_sender_id():
+    fixed_time = datetime(2026, 9, 24, 15, 30, 45, 123456)
+    filename = generate_saved_filename(
+        sender_staff_id="   ",
+        original_filename="document.pdf",
+        timestamp=fixed_time,
+    )
+    assert filename == "20260924_153045.pdf"
 
 
 def test_save_file_directory_structure_and_collision(tmp_path):
@@ -67,7 +117,7 @@ def test_save_file_directory_structure_and_collision(tmp_path):
         timestamp=fixed_time,
     )
 
-    assert saved_path1 == str(output_dir / "20260924_153045_123_staff-001.txt")
+    assert saved_path1 == str(output_dir / "20260924_153045_-001.txt")
     assert os.path.exists(saved_path1)
 
     # Collision check: save another file with same timestamp and sender

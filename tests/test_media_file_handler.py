@@ -69,11 +69,12 @@ async def test_media_file_handler_new_file(tmp_path):
     saved_path_arg = mock_store.async_insert_record.call_args[1]["saved_path"]
     assert os.path.exists(saved_path_arg)
     assert os.path.dirname(saved_path_arg) == str(output_dir)
-    assert os.path.basename(saved_path_arg).endswith("_staff-001.pdf")
+    assert os.path.basename(saved_path_arg).endswith("_-001.pdf")
 
     insert_kwargs = mock_store.async_insert_record.call_args[1]
     assert insert_kwargs["sender_id"] == "user_001"
     assert insert_kwargs["sender_nick"] == "Alice"
+    assert insert_kwargs["sender_staff_id"] == "staff-001"
     assert insert_kwargs["media_type"] == "file"
 
     # Verify reply
