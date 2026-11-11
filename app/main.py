@@ -292,6 +292,7 @@ def main(args=None):
         notify_conversation_id=config.notify_conversation_id,
         notify_staff_id=config.notify_staff_id,
         logger=logger,
+        app_version=get_app_version(),
     )
 
     # Startup snapshot to staff (no-op when NOTIFY_STAFF_ID is unset). It is

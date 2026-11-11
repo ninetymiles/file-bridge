@@ -215,6 +215,7 @@ async def test_online_notification_staff_gets_snapshot_group_gets_usage():
         dingtalk_client=client,
         notify_conversation_id="cid_group_123",
         notify_staff_id="staff_456",
+        app_version="1.2.0",
     )
     snapshot = "当前索引总量：1 位用户上传 1 份文件 (照片 1，视频 0，其他 0)"
 
@@ -231,7 +232,10 @@ async def test_online_notification_staff_gets_snapshot_group_gets_usage():
         assert len(calls) == 2
         # Group (first) keeps usage instructions; staff (second) gets snapshot.
         assert "服务已就绪" in calls[0].args[0]
-        assert calls[1].args[0] == snapshot
+        assert calls[1].args[0].startswith(snapshot)
+        # Both targets report the same running version.
+        assert calls[0].args[0].endswith("当前版本：1.2.0")
+        assert calls[1].args[0].endswith("当前版本：1.2.0")
         # Title is shared by both targets.
         assert calls[0].kwargs["title"] == "🤖 File Bridge 机器人已上线"
         assert calls[1].kwargs["title"] == "🤖 File Bridge 机器人已上线"
@@ -258,3 +262,49 @@ async def test_online_notification_without_snapshot_shares_group_content():
         calls = mock_handler_inst.reply_markdown_card.call_args_list
         assert len(calls) == 2
         assert calls[0].args[0] == calls[1].args[0]
+
+
+@pytest.mark.asyncio
+async def test_online_notification_group_body_includes_version():
+    client = MagicMock()
+    notifier = LifecycleNotifier(
+        dingtalk_client=client,
+        notify_conversation_id="cid_group_123",
+        app_version="1.2.0",
+    )
+
+    with patch("dingtalk_stream.ChatbotHandler") as MockHandler:
+        mock_handler_inst = MockHandler.return_value
+        mock_handler_inst.reply_markdown_card.return_value = MagicMock(
+            card_instance_id="card-1"
+        )
+
+        result = await notifier.send_online_notification()
+
+        assert result is True
+        body = mock_handler_inst.reply_markdown_card.call_args.args[0]
+        assert "服务已就绪" in body
+        assert body.endswith("当前版本：1.2.0")
+
+
+@pytest.mark.asyncio
+async def test_offline_notification_excludes_version():
+    client = MagicMock()
+    notifier = LifecycleNotifier(
+        dingtalk_client=client,
+        notify_conversation_id="cid_group_123",
+        app_version="1.2.0",
+    )
+
+    with patch("dingtalk_stream.ChatbotHandler") as MockHandler:
+        mock_handler_inst = MockHandler.return_value
+        mock_handler_inst.reply_markdown_card.return_value = MagicMock(
+            card_instance_id="card-1"
+        )
+
+        result = await notifier.send_offline_notification()
+
+        assert result is True
+        body = mock_handler_inst.reply_markdown_card.call_args.args[0]
+        assert "服务已停止" in body
+        assert "当前版本" not in body

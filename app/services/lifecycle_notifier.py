@@ -20,12 +20,17 @@ class LifecycleNotifier:
         notify_staff_id: Optional[str] = None,
         logger: Optional[logging.Logger] = None,
         timeout: float = 5.0,
+        app_version: str = "dev",
     ):
         self.dingtalk_client = dingtalk_client
         self.notify_conversation_id = notify_conversation_id
         self.notify_staff_id = notify_staff_id
         self.logger = logger or logging.getLogger("file-bridge.lifecycle")
         self.timeout = timeout
+        # Injected by the entry point instead of reading the environment
+        # here: app.main already imports this module, so importing back for
+        # get_app_version would create a cycle.
+        self.app_version = app_version
 
     @property
     def is_configured(self) -> bool:
@@ -178,11 +183,17 @@ class LifecycleNotifier:
 
         The group target gets usage instructions; the staff target gets the
         supplied index snapshot instead (falls back to the group body when
-        no snapshot is provided).
+        no snapshot is provided). Both bodies end with the running version,
+        so recipients can confirm which build went live without reading logs.
         """
         title = "🤖 File Bridge 机器人已上线"
-        content = "服务已就绪，可以随时在群聊中@机器人 发送视频和照片，或直接私聊机器人发送视频照片。"
-        return await self.send_notification(title, content, staff_content=staff_snapshot)
+        version_line = f"\n\n当前版本：{self.app_version}"
+        content = (
+            "服务已就绪，可以随时在群聊中@机器人 发送视频和照片，或直接私聊机器人发送视频照片。"
+            f"{version_line}"
+        )
+        staff_content = f"{staff_snapshot}{version_line}" if staff_snapshot is not None else None
+        return await self.send_notification(title, content, staff_content=staff_content)
 
     async def send_offline_notification(self) -> bool:
         """Send service offline notification."""
