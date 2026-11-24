@@ -7,6 +7,7 @@ from functools import partial
 from typing import List, Optional
 import dingtalk_stream
 import dotenv
+import httpx
 
 from app.services.command_matching import (
     INDEX_REPORT,
@@ -19,12 +20,18 @@ from app.services.index_report import format_index_snapshot
 from app.services.metadata_store import MetadataStore
 from app.services.file_downloader import FileDownloader
 from app.services.lifecycle_notifier import LifecycleNotifier
+from app.services.photo_review import (
+    PhotoReviewer,
+    ReviewConfig,
+    probe_gateway,
+)
 from app.core.runner import BotService
 from app.handlers import (
     PipelineHandler,
     CommandHandler,
     MediaFileHandler,
 )
+from app.handlers.message import REVIEW_CONNECT_TIMEOUT
 from app.utils.file_storage import write_activity_file
 
 DEFAULT_OUTPUT_DIR = "./output"
@@ -181,6 +188,7 @@ def create_pipeline(
     dingtalk_client,
     matcher,
     logger: Optional[logging.Logger] = None,
+    reviewer: Optional[PhotoReviewer] = None,
 ) -> PipelineHandler:
     """Construct and configure the message pipeline with handlers."""
     file_downloader = FileDownloader(
@@ -218,6 +226,7 @@ def create_pipeline(
                 metadata_store=metadata_store,
                 file_downloader=file_downloader,
                 logger=logger,
+                reviewer=reviewer,
             ),
         ],
         logger=logger,
@@ -284,8 +293,41 @@ def main(args=None):
     run_startup_index_check(metadata_store, logger)
 
     matcher = build_command_matcher(enabled=config.semantic_command_enabled)
-    pipeline = create_pipeline(config.output_dir, metadata_store, client, matcher, logger)
+
+    # Photo review is optional: without all three OPENAI_* variables the bot
+    # replies exactly as before. The reviewer is still gated at startup by a
+    # probe; a failed probe disables it for this process.
+    review_config = ReviewConfig.from_env_optional(os.environ)
+    review_logger = logging.getLogger("file-bridge.review")
+    reviewer = None
+    if review_config is None:
+        logger.info("Photo review disabled: OPENAI_* not configured")
+    else:
+        reviewer = PhotoReviewer(
+            base_url=review_config.base_url,
+            api_key=review_config.api_key,
+            model=review_config.model,
+            timeout=httpx.Timeout(
+                connect=REVIEW_CONNECT_TIMEOUT, read=None, write=None, pool=None
+            ),
+            logger=review_logger,
+        )
+
+    pipeline = create_pipeline(
+        config.output_dir, metadata_store, client, matcher, logger, reviewer=reviewer
+    )
     client.register_callback_handler(dingtalk_stream.chatbot.ChatbotMessage.TOPIC, pipeline)
+
+    media_handler = next(
+        (handler for handler in pipeline.handlers if isinstance(handler, MediaFileHandler)),
+        None,
+    )
+
+    async def probe_photo_review() -> None:
+        if review_config is None or media_handler is None:
+            return
+        if not await probe_gateway(review_config, logger=review_logger):
+            media_handler.disable_review()
 
     notifier = LifecycleNotifier(
         dingtalk_client=client,
@@ -307,6 +349,7 @@ def main(args=None):
     runner = BotService(
         client=client, notifier=notifier, logger=logger, pipeline=pipeline,
         scheduler=scheduler, startup_staff_snapshot=startup_staff_snapshot,
+        startup_hook=probe_photo_review,
     )
     runner.run_forever()
 

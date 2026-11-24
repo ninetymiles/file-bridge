@@ -10,7 +10,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from enum import IntEnum
-from typing import List, Optional, Tuple
+from typing import TYPE_CHECKING, List, Optional, Tuple
 import dingtalk_stream
 from dingtalk_stream import AckMessage, CallbackMessage, ChatbotMessage
 
@@ -23,6 +23,9 @@ from app.services.disk_warmup import ensure_storage_ready
 from app.services.media_metadata import extract_media_metadata
 from app.utils.file_storage import save_file
 
+if TYPE_CHECKING:
+    from app.services.photo_review import PhotoReviewer
+
 
 @dataclass
 class _ImageProcessResult:
@@ -31,6 +34,7 @@ class _ImageProcessResult:
     status: str  # "saved" | "duplicate" | "failed" | "cancelled"
     detail: str  # saved filename for "saved", reply message for others
     metadata: Optional[str] = None  # formatted metadata summary line, or None
+    saved_path: Optional[str] = None  # absolute path on disk, for photo review
 
 
 class ReplyTier(IntEnum):
@@ -44,12 +48,143 @@ class ReplyTier(IntEnum):
     SECONDARY = 200
 
 
+# Photo review timing. The merge window decides whether the review joins the
+# first reply; the total timeout bounds how long a follow-up may live; the
+# connect timeout only catches a dead gateway. See the message-pipeline spec.
+REVIEW_MERGE_WINDOW = 15.0
+REVIEW_TOTAL_TIMEOUT = 60.0
+REVIEW_CONNECT_TIMEOUT = 5.0
+REVIEW_PREFIX = "照片点评："
+
+
 @dataclass(frozen=True)
 class ReplyIntent:
     """Intent to send a reply, produced by a message handler."""
 
     tier: ReplyTier
     text: str
+    # Optional callback run after the pipeline has delivered this reply. It
+    # must return promptly; handlers use it to release a follow-up message
+    # that must never arrive before the first one.
+    after_reply: Optional[Callable[[], None]] = None
+
+
+def _format_reviews(reviews: dict[int, str]) -> Optional[str]:
+    """Render collected reviews, labelled by image order when there are many."""
+    entries = [(index, text) for index, text in sorted(reviews.items()) if text]
+    if not entries:
+        return None
+    if len(entries) == 1:
+        return entries[0][1]
+    return "\n".join(f"图{index}：{text}" for index, text in entries)
+
+
+class _ReviewBatch:
+    """Photo review requests that share one total deadline.
+
+    ``wait`` races the batch against the merge window without cancelling
+    stragglers; ``finish`` waits for what is left until the deadline and then
+    cancels it. Completed reviews are kept in both paths, so a single stuck
+    image never discards the others' results.
+    """
+
+    def __init__(
+        self,
+        reviewer: "PhotoReviewer",
+        entries: list[tuple[int, str]],
+        *,
+        total_timeout: float = REVIEW_TOTAL_TIMEOUT,
+        logger: Optional[logging.Logger] = None,
+        registry: Optional[set[asyncio.Task]] = None,
+    ):
+        self.reviewer = reviewer
+        self.total_timeout = total_timeout
+        self.logger = logger or logging.getLogger(__name__)
+        self._registry = registry
+        self._entries = list(entries)
+        self._tasks: list[asyncio.Task] = []
+        self._reviews: dict[int, str] = {}
+        self._deadline = 0.0
+
+    def __bool__(self) -> bool:
+        return bool(self._tasks or self._entries)
+
+    def add(self, index: int, path: str) -> None:
+        """Start one review task; may be called before :meth:`start`.
+
+        The batch deadline starts with the first request, not when the whole
+        batch is known: group chats launch reviews as each photo is saved, so
+        a slow download must not extend a hung request past the total limit.
+        """
+        if self._deadline == 0.0:
+            self._deadline = asyncio.get_running_loop().time() + self.total_timeout
+        task = asyncio.create_task(self._review(index, path))
+        self._tasks.append(task)
+        if self._registry is not None:
+            self._registry.add(task)
+            task.add_done_callback(self._registry.discard)
+
+    def start(self) -> None:
+        """Create any queued tasks; the deadline may already be running."""
+        if not self._tasks:
+            for index, path in self._entries:
+                self.add(index, path)
+
+    async def _review(self, index: int, path: str) -> tuple[int, Optional[str]]:
+        # PhotoReviewer.review() never raises; the guard is for injected fakes
+        # and future implementations, so one bad review cannot break the batch.
+        try:
+            return index, await self.reviewer.review(path)
+        except Exception as exc:
+            self.logger.warning(
+                "Photo review task failed (%s): %s",
+                type(exc).__name__,
+                str(exc)[:200],
+            )
+            return index, None
+
+    def _collect(self, tasks) -> None:
+        for task in tasks:
+            if task.cancelled():
+                continue
+            try:
+                index, text = task.result()
+            except Exception:
+                continue
+            if text:
+                self._reviews[index] = text
+
+    async def wait(
+        self, timeout: float
+    ) -> tuple[dict[int, str], list[asyncio.Task]]:
+        """Race the batch against *timeout*, leaving stragglers running."""
+        if not self._tasks:
+            return {}, []
+        done, pending = await asyncio.wait(self._tasks, timeout=timeout)
+        self._collect(done)
+        return dict(self._reviews), list(pending)
+
+    async def finish(self) -> dict[int, str]:
+        """Wait for stragglers until the batch deadline, then cancel them."""
+        if not self._tasks:
+            return {}
+        pending = [task for task in self._tasks if not task.done()]
+        if pending:
+            loop = asyncio.get_running_loop()
+            remaining = max(0.0, self._deadline - loop.time())
+            done, still = await asyncio.wait(pending, timeout=remaining)
+            self._collect(done)
+            if still:
+                for task in still:
+                    task.cancel()
+                await asyncio.gather(*still, return_exceptions=True)
+                self.logger.warning(
+                    "Photo review cancelled after %.0fs total timeout (%d request(s))",
+                    self.total_timeout,
+                    len(still),
+                )
+        self._collect([task for task in self._tasks if task.done()])
+        return dict(self._reviews)
 
 
 def merge_rich_text_segments(segments) -> tuple[str, bool]:
@@ -295,19 +430,37 @@ class MediaFileHandler(BaseMessageHandler):
         metadata_store,
         file_downloader,
         logger: Optional[logging.Logger] = None,
+        reviewer: Optional["PhotoReviewer"] = None,
+        review_merge_window: float = REVIEW_MERGE_WINDOW,
+        review_timeout: float = REVIEW_TOTAL_TIMEOUT,
     ):
         self.output_dir = output_dir
         self.metadata_store = metadata_store
         self.file_downloader = file_downloader
         self.logger = logger or logging.getLogger(__name__)
+        # Photo review is optional: None means "reply exactly like before".
+        self.reviewer = reviewer
+        self.review_merge_window = review_merge_window
+        self.review_timeout = review_timeout
         # In-flight interruptible sub-tasks (download phase). Archive phase
         # (dedupe/save/commit/reply) runs inline and is never registered, so
         # cancel_tasks() cannot abort it.
         self._interruptible_tasks: set[asyncio.Task] = set()
+        # Review tasks (batch requests and deferred follow-ups). They are
+        # entertainment-only: shutdown cancels them instead of draining.
+        self._review_tasks: set[asyncio.Task] = set()
+
+    def disable_review(self) -> None:
+        """Turn photo review off for this process (startup probe failed)."""
+        if self.reviewer is not None:
+            self.logger.info("Photo review disabled for this process.")
+        self.reviewer = None
 
     def cancel_tasks(self) -> None:
-        """Cancel all in-flight download sub-tasks; archive work is untouched."""
+        """Cancel download and review sub-tasks; archive work is untouched."""
         for task in list(self._interruptible_tasks):
+            task.cancel()
+        for task in list(self._review_tasks):
             task.cancel()
 
     async def handle(
@@ -358,11 +511,93 @@ class MediaFileHandler(BaseMessageHandler):
             reply = f"文件接收成功，已保存为: {result.detail}"
             if result.metadata:
                 reply = f"{reply}\n{result.metadata}"
-            return ReplyIntent(tier=ReplyTier.PRIMARY, text=reply)
+            batch = None
+            if msgtype == "picture" and result.saved_path:
+                batch = self._start_review_batch([(1, result.saved_path)])
+            return await self._reply_with_reviews(reply, batch, message, pipeline)
         elif result.status == "cancelled":
             return ReplyIntent(tier=ReplyTier.PRIMARY, text=result.detail)
         else:
             return ReplyIntent(tier=ReplyTier.PRIMARY, text=result.detail)
+
+    def _new_review_batch(self) -> Optional[_ReviewBatch]:
+        """Create an empty batch, or None when review is disabled."""
+        if self.reviewer is None:
+            return None
+        return _ReviewBatch(
+            self.reviewer,
+            [],
+            total_timeout=self.review_timeout,
+            logger=self.logger,
+            registry=self._review_tasks,
+        )
+
+    def _start_review_batch(
+        self, entries: list[tuple[int, str]]
+    ) -> Optional[_ReviewBatch]:
+        """Start review requests for saved photos, or None when disabled."""
+        batch = self._new_review_batch()
+        if batch is None or not entries:
+            return None
+        for index, path in entries:
+            batch.add(index, path)
+        batch.start()
+        return batch
+
+    async def _reply_with_reviews(
+        self,
+        reply_text: str,
+        batch: Optional[_ReviewBatch],
+        incoming_message: ChatbotMessage,
+        pipeline: "PipelineHandler",
+    ) -> ReplyIntent:
+        """Merge reviews into the first reply, or defer them to a follow-up.
+
+        The first reply is always returned as an intent so it keeps merging
+        with other handlers' intents. When the window expires, a gated task is
+        released only after the pipeline has sent that reply, which guarantees
+        the review can never arrive first.
+        """
+        if batch is None:
+            return ReplyIntent(tier=ReplyTier.PRIMARY, text=reply_text)
+
+        reviews, pending = await batch.wait(self.review_merge_window)
+        block = _format_reviews(reviews)
+        if not pending:
+            text = f"{reply_text}\n{block}" if block else reply_text
+            return ReplyIntent(tier=ReplyTier.PRIMARY, text=text)
+
+        gate = asyncio.Event()
+
+        async def send_followup() -> None:
+            try:
+                await gate.wait()
+                follow_text = _format_reviews(await batch.finish())
+                if not follow_text:
+                    return
+                await pipeline.async_reply_text(
+                    f"{REVIEW_PREFIX}\n{follow_text}", incoming_message
+                )
+            except asyncio.CancelledError:
+                self.logger.info("Photo review follow-up cancelled by shutdown.")
+                raise
+            except Exception as exc:
+                self.logger.warning(
+                    "Photo review follow-up failed (%s): %s",
+                    type(exc).__name__,
+                    str(exc)[:200],
+                )
+
+        followup = asyncio.create_task(send_followup())
+        self._review_tasks.add(followup)
+        followup.add_done_callback(self._review_tasks.discard)
+
+        def release() -> None:
+            gate.set()
+
+        return ReplyIntent(
+            tier=ReplyTier.PRIMARY, text=reply_text, after_reply=release
+        )
 
     async def _process_one_image(
         self,
@@ -444,7 +679,12 @@ class MediaFileHandler(BaseMessageHandler):
             # raises — failures yield None and the reply stays filename-only.
             metadata_line = extract_media_metadata(saved_path, msgtype)
 
-            return _ImageProcessResult("saved", saved_filename, metadata=metadata_line)
+            return _ImageProcessResult(
+                "saved",
+                saved_filename,
+                metadata=metadata_line,
+                saved_path=saved_path,
+            )
 
         except Exception as e:
             self.logger.error(f"Failed to process media file ({original_filename}): {e}", exc_info=True)
@@ -470,6 +710,7 @@ class MediaFileHandler(BaseMessageHandler):
             return None
 
         results: List[_ImageProcessResult] = []
+        batch = self._new_review_batch()
         for index, seg in enumerate(picture_segments, start=1):
             download_code = seg["downloadCode"]
             result = await self._process_one_image(
@@ -481,6 +722,10 @@ class MediaFileHandler(BaseMessageHandler):
                 msgtype="picture",
             )
             results.append(result)
+            # Start each review as soon as its file is saved, so later
+            # downloads overlap with earlier reviews.
+            if batch is not None and result.status == "saved" and result.saved_path:
+                batch.add(index, result.saved_path)
             if result.status == "cancelled":
                 break
 
@@ -494,7 +739,14 @@ class MediaFileHandler(BaseMessageHandler):
             else:
                 reply_lines.append(result.detail)
 
-        return ReplyIntent(tier=ReplyTier.PRIMARY, text="\n".join(reply_lines))
+        if batch is not None:
+            if batch:
+                batch.start()
+            else:
+                batch = None
+        return await self._reply_with_reviews(
+            "\n".join(reply_lines), batch, message, pipeline
+        )
 
     async def _download_phase(self, download_code: str):
         """Resolve download URL and stream the file to a temp path.
@@ -739,10 +991,22 @@ class PipelineHandler(dingtalk_stream.ChatbotHandler):
 
         if intents:
             highest_tier = min(intent.tier for intent in intents)
-            merged = "\n".join(
-                intent.text for intent in intents if intent.tier == highest_tier
-            )
+            selected = [intent for intent in intents if intent.tier == highest_tier]
+            merged = "\n".join(intent.text for intent in selected)
             await self.async_reply_text(merged, incoming_message)
+            # Follow-ups (e.g. a deferred photo review) are released only
+            # after the first reply has been delivered.
+            for intent in selected:
+                if intent.after_reply is None:
+                    continue
+                try:
+                    intent.after_reply()
+                except Exception as e:
+                    self.logger.warning(
+                        "Reply follow-up failed to start (%s): %s",
+                        type(e).__name__,
+                        str(e)[:200],
+                    )
         else:
             conversation_type = incoming_message.conversation_type or raw_data.get("conversationType")
             if conversation_type == "1":

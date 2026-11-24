@@ -271,3 +271,54 @@ async def test_scheduler_started_on_start_and_stopped_on_stop():
     service.request_stop("SIGINT")
     await service.stop()
     scheduler.stop.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_startup_hook_runs_before_sdk_start():
+    order = []
+
+    async def hook():
+        order.append("hook")
+
+    async def mock_start():
+        order.append("sdk")
+        await asyncio.Event().wait()
+
+    client = MagicMock()
+    client.start = mock_start
+    client.websocket = None
+
+    service = BotService(client=client, logger=MagicMock(), startup_hook=hook)
+    run_task = asyncio.create_task(service.start_and_wait())
+    await asyncio.sleep(0.01)
+
+    service.request_stop("SIGINT")
+    await asyncio.wait_for(run_task, timeout=2.0)
+
+    assert order[:2] == ["hook", "sdk"]
+
+
+@pytest.mark.asyncio
+async def test_startup_hook_failure_does_not_block_start():
+    async def hook():
+        raise RuntimeError("probe exploded")
+
+    started = asyncio.Event()
+
+    async def mock_start():
+        started.set()
+        await asyncio.Event().wait()
+
+    client = MagicMock()
+    client.start = mock_start
+    client.websocket = None
+    logger = MagicMock()
+
+    service = BotService(client=client, logger=logger, startup_hook=hook)
+    run_task = asyncio.create_task(service.start_and_wait())
+    await asyncio.wait_for(started.wait(), timeout=1.0)
+
+    service.request_stop("SIGINT")
+    await asyncio.wait_for(run_task, timeout=2.0)
+
+    assert logger.warning.called

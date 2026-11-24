@@ -10,6 +10,7 @@ FastAPI.
 import asyncio
 import logging
 import signal
+from collections.abc import Awaitable, Callable
 from typing import Optional, TYPE_CHECKING
 import dingtalk_stream
 
@@ -25,8 +26,9 @@ class BotService:
 
     The service exposes two idempotent public methods:
 
-    - :meth:`start`: construct the runtime, send online notification, launch
-      the SDK background task and register ``SIGINT``/``SIGTERM`` handlers.
+    - :meth:`start`: run an optional startup hook, construct the runtime, send
+      online notification, launch the SDK background task and register
+      ``SIGINT``/``SIGTERM`` handlers.
     - :meth:`stop`: run the graceful shutdown sequence (close the pipeline
       intake gate and drain in-flight message tasks with a bounded wait ->
       ``runner_task.cancel()`` with a bounded wait -> fire-and-forget
@@ -45,12 +47,14 @@ class BotService:
         pipeline: Optional["PipelineHandler"] = None,
         scheduler: Optional["DailyReportScheduler"] = None,
         startup_staff_snapshot: Optional[str] = None,
+        startup_hook: Optional[Callable[[], Awaitable[None]]] = None,
     ):
         self.client = client
         self.notifier = notifier
         self.pipeline = pipeline
         self.scheduler = scheduler
         self.startup_staff_snapshot = startup_staff_snapshot
+        self.startup_hook = startup_hook
         self.logger = logger or logging.getLogger("file-bridge.runner")
         self._stop_event: Optional[asyncio.Event] = None
         self._runner_task: Optional[asyncio.Task] = None
@@ -75,6 +79,17 @@ class BotService:
         self._stop_event = asyncio.Event()
         self._is_shutting_down = False
         self._setup_signal_handlers(loop)
+
+        # Startup hook runs before the SDK starts consuming messages, so any
+        # availability check it performs is already settled for the first
+        # message. A hook failure is logged and does not block startup.
+        if self.startup_hook is not None:
+            try:
+                await self.startup_hook()
+            except Exception as e:
+                self.logger.warning(
+                    "Startup hook failed (%s): %s", type(e).__name__, e
+                )
 
         # Send online notification if notifier is configured (blocking is fine
         # at startup; only offline notification needs to be fire-and-forget).

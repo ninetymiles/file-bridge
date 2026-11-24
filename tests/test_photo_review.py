@@ -5,6 +5,7 @@ Every test runs offline: gateway responses are synthesized with
 is passed as a literal mapping. No test reads or mutates ``os.environ``.
 """
 
+import asyncio
 import base64
 import io
 import json
@@ -24,6 +25,7 @@ from app.services.photo_review import (
     PhotoReviewer,
     ReviewConfig,
     ReviewConfigError,
+    probe_gateway,
 )
 from script import review as script_review
 
@@ -536,3 +538,84 @@ def test_cli_leaves_input_and_directory_untouched(tmp_path, capsys):
     assert path.read_bytes() == original_bytes
     assert path.stat().st_mtime_ns == original_mtime
     assert sorted(entry.name for entry in tmp_path.iterdir()) == original_entries
+
+
+# --- optional configuration (message-chain entry) --------------------------
+
+
+def test_config_optional_returns_config_when_complete():
+    config = ReviewConfig.from_env_optional(CONFIG_ENV)
+
+    assert config is not None
+    assert config.base_url == "http://gateway.local/v1"
+    assert config.api_key == "sk-test"
+    assert config.model == "test-model"
+
+
+@pytest.mark.parametrize("name", ["OPENAI_BASE_URL", "OPENAI_API_KEY", "OPENAI_MODEL"])
+def test_config_optional_returns_none_when_missing(name):
+    env = {key: value for key, value in CONFIG_ENV.items() if key != name}
+
+    assert ReviewConfig.from_env_optional(env) is None
+
+
+@pytest.mark.parametrize("name", ["OPENAI_BASE_URL", "OPENAI_API_KEY", "OPENAI_MODEL"])
+def test_config_optional_returns_none_when_blank(name):
+    env = {**CONFIG_ENV, name: "   "}
+
+    assert ReviewConfig.from_env_optional(env) is None
+
+
+def test_config_optional_does_not_swallow_unexpected_errors():
+    class Exploding(dict):
+        def get(self, key, default=None):
+            raise RuntimeError("boom")
+
+    with pytest.raises(RuntimeError):
+        ReviewConfig.from_env_optional(Exploding())
+
+
+# --- startup availability probe -------------------------------------------
+
+
+def test_probe_reports_ready_and_encodes_model_name(caplog):
+    recorder = _Recorder([httpx.Response(200, json={"id": "qwen3.5:9b"})])
+    config = ReviewConfig("http://gateway.local/v1", "sk-test", "qwen3.5:9b")
+
+    with caplog.at_level(logging.INFO, logger="file-bridge.review"):
+        ready = asyncio.run(_probe(config, recorder))
+
+    assert ready is True
+    request = recorder.requests[0]
+    assert request.method == "GET"
+    assert request.url.raw_path == b"/v1/models/qwen3.5%3A9b"
+    assert request.headers["authorization"] == "Bearer sk-test"
+    assert "Photo review ready" in caplog.text
+
+
+def test_probe_reports_missing_model(caplog):
+    recorder = _Recorder([httpx.Response(404, json={"error": {"message": "not found"}})])
+    config = ReviewConfig("http://gateway.local/v1", "sk-test", "missing")
+
+    with caplog.at_level(logging.WARNING, logger="file-bridge.review"):
+        ready = asyncio.run(_probe(config, recorder))
+
+    assert ready is False
+    assert "status=404" in caplog.text
+
+
+def test_probe_reports_connection_failure(caplog):
+    recorder = _Recorder([httpx.ConnectError("connection refused")])
+    config = ReviewConfig("http://gateway.local/v1", "sk-test", "test-model")
+
+    with caplog.at_level(logging.WARNING, logger="file-bridge.review"):
+        ready = asyncio.run(_probe(config, recorder))
+
+    assert ready is False
+    assert "ConnectError" in caplog.text
+    assert "sk-test" not in caplog.text
+
+
+async def _probe(config, recorder):
+    async with _client(recorder) as client:
+        return await probe_gateway(config, http_client=client)
