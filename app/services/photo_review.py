@@ -16,7 +16,6 @@ import io
 import logging
 from dataclasses import dataclass
 from typing import Any, Dict, List, Mapping, Optional
-from urllib.parse import quote
 
 import httpx
 from PIL import Image, ImageOps
@@ -44,6 +43,14 @@ REQUIRED_ENV = (ENV_BASE_URL, ENV_API_KEY, ENV_MODEL)
 
 API_KEY_MASK_LENGTH = 8
 PROBE_TIMEOUT = 3.0
+WARMUP_CONNECT_TIMEOUT = 5.0
+WARMUP_READ_TIMEOUT = 30.0
+WARMUP_TIMEOUT = httpx.Timeout(
+    WARMUP_CONNECT_TIMEOUT, read=WARMUP_READ_TIMEOUT
+)
+WARMUP_MAX_TOKENS = 1
+WARMUP_PROMPT = "ping"
+AVAILABLE_MODEL_SAMPLE = 5
 
 
 class ReviewConfigError(ValueError):
@@ -98,6 +105,26 @@ class ReviewConfig:
             return None
 
 
+@dataclass(frozen=True)
+class GatewayProbe:
+    """Result of the startup gateway health check.
+
+    ``ready`` is the only capability gate: the gateway answered successfully
+    and the configured model appears in its model list.
+    """
+
+    reachable: bool
+    status: Optional[int]
+    models: tuple[str, ...]
+    model_present: bool
+    error: Optional[str] = None
+
+    @property
+    def ready(self) -> bool:
+        """Return True only when the API is reachable and the model is listed."""
+        return self.reachable and self.model_present
+
+
 def _to_rgb(image: Image.Image) -> Image.Image:
     """Return an RGB image, compositing any alpha channel onto white."""
     if image.mode in ("RGBA", "LA", "P"):
@@ -135,12 +162,41 @@ def _mask_api_key(api_key: str) -> str:
 
 
 def models_endpoint(config: ReviewConfig) -> str:
-    """Return the per-model probe URL with the model name URL-encoded.
+    """Return the model-list endpoint used by the startup health check."""
+    return f"{config.base_url}/models"
 
-    Model names may contain ``:`` (``qwen3.5:9b``); leaving it raw would let
-    the gateway parse it as a path delimiter.
+
+def _parse_model_ids(payload: Any) -> Optional[tuple[str, ...]]:
+    """Extract model ids from an OpenAI-compatible ``/models`` payload.
+
+    Only the base OpenAI shape is supported: ``{"data": [{"id": "..."}]}``.
+    Entries that are not objects, or whose ``id`` is not a non-empty string,
+    are skipped. Returns ``None`` when the payload carries no ``data`` list,
+    so the caller can treat model availability as unverified.
     """
-    return f"{config.base_url}/models/{quote(config.model, safe='')}"
+    if not isinstance(payload, dict):
+        return None
+    entries = payload.get("data")
+    if not isinstance(entries, list):
+        return None
+
+    model_ids = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        model_id = entry.get("id")
+        if isinstance(model_id, str) and model_id.strip():
+            model_ids.append(model_id)
+    return tuple(model_ids)
+
+
+def _format_available(models: tuple[str, ...]) -> str:
+    """Render a short, truncated sample of available model ids."""
+    sample = models[:AVAILABLE_MODEL_SAMPLE]
+    rendered = ", ".join(sample)
+    if len(models) > len(sample):
+        rendered = f"{rendered}, ..."
+    return f"[{rendered}]"
 
 
 async def probe_gateway(
@@ -148,45 +204,206 @@ async def probe_gateway(
     timeout: float = PROBE_TIMEOUT,
     http_client: Optional[httpx.AsyncClient] = None,
     logger: Optional[logging.Logger] = None,
-) -> bool:
-    """Check that the gateway answers for the configured model.
+) -> GatewayProbe:
+    """Check that the gateway is reachable and exposes the configured model.
 
-    Uses ``GET /models/{model}`` exactly like the deployment checklist: a 2xx
-    proves the base URL, credentials and model name are consistent. It does
-    NOT load the model, so the first review can still pay a cold-start cost.
+    Uses ``GET /models`` and checks the configured model name against the
+    returned list. A 2xx alone only proves the route and credentials; the
+    configured model must also be present before photo review is enabled.
 
-    Never raises: every failure is logged as a warning and reported as False.
+    Never raises: every failure is reported in a single log line and returned
+    as a non-ready :class:`GatewayProbe`.
     """
     log = logger or logging.getLogger(LOGGER_NAME)
+    url = models_endpoint(config)
+    key = _mask_api_key(config.api_key)
+    log.debug("Photo review probe: GET %s model=%s", url, config.model)
+
     owns_client = http_client is None
     client = http_client or httpx.AsyncClient(timeout=timeout)
     try:
         try:
             response = await client.get(
-                models_endpoint(config),
+                url,
                 headers={"Authorization": f"Bearer {config.api_key}"},
             )
         except Exception as exc:
             log.warning(
-                "Photo review unavailable (%s): %s",
+                "Photo review health FAILED: url=%s model=%s error=%s:%s key=%s",
+                url,
+                config.model,
                 type(exc).__name__,
                 str(exc)[:200],
+                key,
             )
-            return False
+            return GatewayProbe(
+                reachable=False,
+                status=None,
+                models=(),
+                model_present=False,
+                error=f"{type(exc).__name__}: {str(exc)[:200]}",
+            )
     finally:
         if owns_client:
             await client.aclose()
 
-    if response.is_success:
-        log.info("Photo review ready: model=%s", config.model)
-        return True
+    if not response.is_success:
+        log.warning(
+            "Photo review health FAILED: url=%s model=%s status=%s body=%s key=%s",
+            url,
+            config.model,
+            response.status_code,
+            response.text[:200],
+            key,
+        )
+        return GatewayProbe(
+            reachable=False,
+            status=response.status_code,
+            models=(),
+            model_present=False,
+            error=f"HTTP {response.status_code}",
+        )
+
+    try:
+        payload = response.json()
+    except Exception as exc:
+        log.warning(
+            "Photo review health FAILED: url=%s model=%s error=%s:%s key=%s",
+            url,
+            config.model,
+            type(exc).__name__,
+            str(exc)[:200],
+            key,
+        )
+        return GatewayProbe(
+            reachable=True,
+            status=response.status_code,
+            models=(),
+            model_present=False,
+            error=f"invalid model list JSON: {type(exc).__name__}",
+        )
+
+    models = _parse_model_ids(payload)
+    if models is None:
+        log.warning(
+            "Photo review health FAILED: url=%s model=%s error=unparsable_model_list key=%s",
+            url,
+            config.model,
+            key,
+        )
+        return GatewayProbe(
+            reachable=True,
+            status=response.status_code,
+            models=(),
+            model_present=False,
+            error="unparsable model list",
+        )
+
+    log.debug("Photo review models: %s", list(models))
+    model_present = config.model in models
+    if model_present:
+        log.info(
+            "Photo review health OK: url=%s model=%s models=%d present=yes key=%s",
+            url,
+            config.model,
+            len(models),
+            key,
+        )
+        return GatewayProbe(
+            reachable=True,
+            status=response.status_code,
+            models=models,
+            model_present=True,
+        )
 
     log.warning(
-        "Photo review unavailable (status=%s): %s",
-        response.status_code,
-        response.text[:200],
+        "Photo review health FAILED: url=%s model=%s models=%d present=no available=%s key=%s",
+        url,
+        config.model,
+        len(models),
+        _format_available(models),
+        key,
     )
-    return False
+    return GatewayProbe(
+        reachable=True,
+        status=response.status_code,
+        models=models,
+        model_present=False,
+        error="model not listed",
+    )
+
+
+_warmup_in_flight = False
+
+
+async def warmup_model(
+    config: ReviewConfig,
+    http_client: Optional[httpx.AsyncClient] = None,
+    logger: Optional[logging.Logger] = None,
+    timeout: httpx.Timeout = WARMUP_TIMEOUT,
+) -> None:
+    """Send a minimal chat request so the gateway starts loading the model.
+
+    Called only when a cold-disk wakeup is under way. One in-flight request is
+    enough: concurrent cold messages return early instead of stacking traffic.
+    Never raises and never changes the review enable decision; a failure is
+    reported as a single WARNING line.
+    """
+    global _warmup_in_flight
+    if _warmup_in_flight:
+        return
+    _warmup_in_flight = True
+
+    log = logger or logging.getLogger(LOGGER_NAME)
+    url = f"{config.base_url}/chat/completions"
+    payload = {
+        "model": config.model,
+        "messages": [{"role": "user", "content": WARMUP_PROMPT}],
+        "max_tokens": WARMUP_MAX_TOKENS,
+        "reasoning_effort": REASONING_EFFORT,
+    }
+    owns_client = http_client is None
+    client = http_client or httpx.AsyncClient(timeout=timeout)
+    try:
+        try:
+            response = await client.post(
+                url,
+                headers={
+                    "Authorization": f"Bearer {config.api_key}",
+                    "Content-Type": "application/json",
+                },
+                json=payload,
+            )
+        except Exception as exc:
+            log.warning(
+                "Photo review warmup FAILED: url=%s model=%s error=%s:%s",
+                url,
+                config.model,
+                type(exc).__name__,
+                str(exc)[:200],
+            )
+            return
+
+        if response.is_success:
+            log.debug(
+                "Photo review warmup OK: url=%s model=%s key=%s",
+                url,
+                config.model,
+                _mask_api_key(config.api_key),
+            )
+            return
+        log.warning(
+            "Photo review warmup FAILED: url=%s model=%s status=%s body=%s key=%s",
+            url,
+            config.model,
+            response.status_code,
+            response.text[:200],
+            _mask_api_key(config.api_key),
+        )
+    finally:
+        _warmup_in_flight = False
+        if owns_client:
+            await client.aclose()
 
 
 class PhotoReviewer:

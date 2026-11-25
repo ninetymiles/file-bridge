@@ -3,6 +3,7 @@
 import argparse
 import logging
 import os
+from collections.abc import Awaitable, Callable
 from functools import partial
 from typing import List, Optional
 import dingtalk_stream
@@ -24,6 +25,7 @@ from app.services.photo_review import (
     PhotoReviewer,
     ReviewConfig,
     probe_gateway,
+    warmup_model,
 )
 from app.core.runner import BotService
 from app.handlers import (
@@ -189,6 +191,7 @@ def create_pipeline(
     matcher,
     logger: Optional[logging.Logger] = None,
     reviewer: Optional[PhotoReviewer] = None,
+    wake_warmup: Optional[Callable[[], Awaitable[None]]] = None,
 ) -> PipelineHandler:
     """Construct and configure the message pipeline with handlers."""
     file_downloader = FileDownloader(
@@ -231,6 +234,7 @@ def create_pipeline(
         ],
         logger=logger,
         storage_probe=partial(write_activity_file, output_dir),
+        wake_warmup=wake_warmup,
     )
     return pipeline
 
@@ -277,6 +281,28 @@ def log_startup_summary(config: argparse.Namespace, logger: logging.Logger) -> N
     )
 
 
+class _ReviewGate:
+    """Mutable startup flag shared by the probe hook and the warmup trigger."""
+
+    def __init__(self) -> None:
+        self.ready = False
+
+
+def _build_wake_warmup(
+    review_config: Optional[ReviewConfig],
+    gate: _ReviewGate,
+    logger: logging.Logger,
+) -> Callable[[], Awaitable[None]]:
+    """Bind the cold-disk preload to the startup probe's enable decision."""
+
+    async def wake_warmup() -> None:
+        if review_config is None or not gate.ready:
+            return
+        await warmup_model(review_config, logger=logger)
+
+    return wake_warmup
+
+
 def main(args=None):
     # Load .env only at the product entry point; importing this module must
     # stay side-effect free so tests never inherit local environment values.
@@ -313,8 +339,11 @@ def main(args=None):
             logger=review_logger,
         )
 
+    review_gate = _ReviewGate()
     pipeline = create_pipeline(
-        config.output_dir, metadata_store, client, matcher, logger, reviewer=reviewer
+        config.output_dir, metadata_store, client, matcher, logger,
+        reviewer=reviewer,
+        wake_warmup=_build_wake_warmup(review_config, review_gate, review_logger),
     )
     client.register_callback_handler(dingtalk_stream.chatbot.ChatbotMessage.TOPIC, pipeline)
 
@@ -326,7 +355,10 @@ def main(args=None):
     async def probe_photo_review() -> None:
         if review_config is None or media_handler is None:
             return
-        if not await probe_gateway(review_config, logger=review_logger):
+        probe = await probe_gateway(review_config, logger=review_logger)
+        if probe.ready:
+            review_gate.ready = True
+        else:
             media_handler.disable_review()
 
     notifier = LifecycleNotifier(

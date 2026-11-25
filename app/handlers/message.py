@@ -766,6 +766,7 @@ class PipelineHandler(dingtalk_stream.ChatbotHandler):
         handlers: Optional[List[BaseMessageHandler]] = None,
         logger: Optional[logging.Logger] = None,
         storage_probe: Optional[Callable[[], None]] = None,
+        wake_warmup: Optional[Callable[[], Awaitable[None]]] = None,
     ):
         super().__init__()
         self.handlers: List[BaseMessageHandler] = handlers or []
@@ -776,6 +777,10 @@ class PipelineHandler(dingtalk_stream.ChatbotHandler):
         # Blocking storage warmup probe, run in a worker thread at dispatch
         # entry. Assembly binds the output-volume probe; tests may override.
         self.storage_probe = storage_probe or _always_ready_probe
+        # Optional fire-and-forget model preload, started alongside the
+        # cold-disk notice. The callback owns its own failure handling.
+        self.wake_warmup = wake_warmup
+        self._warmup_tasks: set[asyncio.Task] = set()
         # Shutdown drain state: in-flight SDK message tasks (set of asyncio.Task).
         # Each message runs in its own SDK-created task; process() registers it.
         self._draining = False
@@ -815,6 +820,8 @@ class PipelineHandler(dingtalk_stream.ChatbotHandler):
         runs to completion inside the still-registered SDK task.
         """
         self._draining = True
+        for task in list(self._warmup_tasks):
+            task.cancel()
         for handler in self.handlers:
             handler.cancel_tasks()
         self.logger.info("Intake gate closed; handlers notified to cancel interruptible tasks.")
@@ -956,10 +963,18 @@ class PipelineHandler(dingtalk_stream.ChatbotHandler):
         # loop (and the warmup timer itself) on a sleeping disk. The warmup
         # notice and the unavailable notice are sent by the Dispatcher
         # directly, outside the intent model.
+        def on_waking() -> Awaitable[None]:
+            # Fire-and-forget: the wakeup notice must not wait for the preload.
+            if self.wake_warmup is not None:
+                task = asyncio.create_task(self.wake_warmup())
+                self._warmup_tasks.add(task)
+                task.add_done_callback(self._warmup_tasks.discard)
+            return self.async_reply_text(WAKING_STORAGE_TEXT, incoming_message)
+
         try:
             await ensure_storage_ready(
                 probe=self.storage_probe,
-                on_waking=lambda: self.async_reply_text(WAKING_STORAGE_TEXT, incoming_message),
+                on_waking=on_waking,
             )
         except Exception as e:
             self.logger.error(f"Storage warmup probe failed: {e}", exc_info=True)

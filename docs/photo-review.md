@@ -38,7 +38,11 @@ uv run python -m script.review ./photo.jpg > review.txt
 
 ## 在钉钉消息中的行为
 
-机器人启动时会用 `GET <OPENAI_BASE_URL>/models/<模型名>` 探测网关（模型名自动 URL 编码，超时 3 秒）：成功记 INFO `Photo review ready`，失败记 WARNING 并在本次进程内**禁用点评**，直到重启。探测只验证地址、凭证与模型名，不会加载模型。
+机器人启动时会用 `GET <OPENAI_BASE_URL>/models` 探测网关（超时 3 秒），解析 OpenAI 标准返回中 `data[].id` 的模型清单，并与 `OPENAI_MODEL` 精确匹配（区分大小写）。只有响应 2xx 且清单包含该模型时才启用点评；非 2xx、超时、网络异常、清单无法解析或模型不在清单中，都会记一条 WARNING 并在本次进程内**禁用点评**，直到重启。探测只验证地址、凭证与模型名，不会加载模型。
+
+不要用逐模型路径 `GET /models/<模型名>` 探测：当前网关按虚拟 key 限制 `llm_api_routes` 后，该路径固定返回 403。
+
+成功时输出单行 INFO 健康报告，字段为 `url=<base_url>/models model=<模型> models=<数量> present=yes key=<掩码>`；失败时输出同级 WARNING，字段相同，并按原因附加 `status` 或异常类型，模型缺失时追加删减后的可用模型样例。完整清单只在 DEBUG 输出。
 
 启用后，照片回复采用两段式：
 
@@ -56,6 +60,8 @@ uv run python -m script.review ./photo.jpg > review.txt
 - 点评在首次回复之后才发送，停机时正在进行的点评会被直接取消，不会补发。
 
 注意：探测成功不等于模型已加载。模型被卸载后第一次点评仍可能触发约 9 秒的冷加载（实测 8.94 秒）；这段时间通常仍在 15 秒窗口内，表现为回复稍慢。
+
+当消息处理入口的存储探针超过 3 秒（冷盘），且启动健康检测已通过时，机器人会在发送「正在唤醒存储服务」提示的同时，后台发起一次 `max_tokens=1` 的文本 ping（内容 `ping`），提前触发模型加载。该 ping 不阻塞提示与磁盘等待，也不参与点评启用决策：成功只在 DEBUG 可见，失败只记一行 WARNING；同一冷盘期间并发消息至多只有一个未完成的 ping。
 
 ## 退出码
 
@@ -78,8 +84,10 @@ uv run python -m script.review ./photo.jpg > review.txt
 | 现象 | 常见原因 |
 |---|---|
 | 启动日志 `Photo review disabled: OPENAI_* not configured` | 三项配置未配齐；照片回复仍正常，只是没有点评 |
-| 启动日志 `Photo review unavailable (status=404)` | `OPENAI_MODEL` 与网关注册名不一致；本次进程内点评被禁用 |
-| 启动日志 `Photo review unavailable (ConnectError)` | 网关地址不可达；确认 ollama/LiteLLM 已启动后重启机器人 |
+| 启动日志 `Photo review health FAILED ... present=no` | `OPENAI_MODEL` 不在 `/models` 清单中；按日志里的 `available=` 样例修正别名，LiteLLM 下需带 `provider/` 前缀 |
+| 启动日志 `Photo review health FAILED ... status=403` | 网关按虚拟 key 限制路由；确认该 key 能访问 `/models`，且不要改用逐模型路径 |
+| 启动日志 `Photo review health FAILED ... error=ConnectError` | 网关地址不可达；确认 ollama/LiteLLM 已启动后重启机器人 |
+| 启动日志 `Photo review warmup FAILED` | 冷盘预热 ping 失败，只影响首次点评的快慢；确认网关与模型状态后无需重启 |
 | 照片回复有 EXIF 但没有点评 | 点评失败或超过 60 秒总时限，查看 `file-bridge.review` 的 WARNING |
 | 点评总是晚于保存消息到达 | 点评未在 15 秒内完成，属预期的两段式行为 |
 | 退出码 2，提示 `OPENAI_MODEL` 等缺失 | `.env` 未配置，或变量名拼写不一致 |

@@ -1,5 +1,6 @@
 """End-to-end integration tests for the message pipeline and app entrypoint."""
 
+import asyncio
 import functools
 import logging
 import os
@@ -9,11 +10,18 @@ import pytest
 from unittest.mock import MagicMock, AsyncMock
 import httpx
 from dingtalk_stream import CallbackMessage, AckMessage
+import app.main as main_module
 import app.handlers.message as message_module
-from app.main import create_pipeline, setup_logger
+from app.main import (
+    _ReviewGate,
+    _build_wake_warmup,
+    create_pipeline,
+    setup_logger,
+)
 from app.services.command_matching import SubstringCommandMatcher
 from app.services.disk_warmup import ensure_storage_ready
 from app.services.metadata_store import MetadataStore
+from app.services.photo_review import ReviewConfig
 from app.handlers.message import (
     CAPABILITY_VARIANTS,
     STORAGE_UNAVAILABLE_TEXT,
@@ -317,7 +325,7 @@ def short_warmup_delay(monkeypatch):
     )
 
 
-def _build_warmup_pipeline(tmp_path):
+def _build_warmup_pipeline(tmp_path, wake_warmup=None):
     """Assemble the real pipeline on a tmp output dir; replies are captured."""
     output_dir = tmp_path / "warmup_output"
     mock_client = MagicMock()
@@ -325,7 +333,8 @@ def _build_warmup_pipeline(tmp_path):
     mock_client.get_access_token = MagicMock(return_value="mock_access_token")
     metadata_store = MetadataStore(output_dir=str(output_dir))
     pipeline = create_pipeline(
-        str(output_dir), metadata_store, mock_client, SubstringCommandMatcher()
+        str(output_dir), metadata_store, mock_client, SubstringCommandMatcher(),
+        wake_warmup=wake_warmup,
     )
     replies = []
 
@@ -539,6 +548,123 @@ async def test_cold_disk_rebuild_command_replies_waking_then_result(
     assert len(replies) == 2
     assert replies[0] == WAKING_STORAGE_TEXT
     assert replies[1].startswith("索引重建完成")
+
+
+@pytest.mark.asyncio
+async def test_cold_wakeup_preload_starts_and_notice_is_not_delayed(
+    tmp_path, short_warmup_delay
+):
+    events = []
+    release = asyncio.Event()
+
+    async def hanging_warmup():
+        events.append("warmup")
+        await release.wait()
+
+    pipeline, _, replies = _build_warmup_pipeline(tmp_path, wake_warmup=hanging_warmup)
+
+    def slow_probe():
+        time.sleep(0.2)
+        events.append("probe_done")
+
+    pipeline.storage_probe = slow_probe
+
+    base_reply = pipeline.reply_text
+
+    def timed_reply(text, msg):
+        events.append(("reply", text))
+        return base_reply(text, msg)
+
+    pipeline.reply_text = timed_reply
+
+    status, _ = await _send(pipeline, {
+        **_BASE_DATA,
+        "msgtype": "text",
+        "text": {"content": "你好"},
+    })
+
+    assert status == AckMessage.STATUS_OK
+    assert replies[0] == WAKING_STORAGE_TEXT
+    assert len(replies) == 2
+    # Both the notice and the preload start before the probe finishes.
+    assert events.index(("reply", WAKING_STORAGE_TEXT)) < events.index("probe_done")
+    assert events.index("warmup") < events.index("probe_done")
+
+    # Shutdown cancels the still-running preload task.
+    pipeline.begin_drain()
+    await asyncio.sleep(0)
+
+
+@pytest.mark.asyncio
+async def test_hot_disk_does_not_start_preload(tmp_path):
+    calls = []
+
+    async def recording_warmup():
+        calls.append("warmup")
+
+    pipeline, _, replies = _build_warmup_pipeline(tmp_path, wake_warmup=recording_warmup)
+
+    status, _ = await _send(pipeline, {
+        **_BASE_DATA,
+        "msgtype": "text",
+        "text": {"content": "你好"},
+    })
+
+    assert status == AckMessage.STATUS_OK
+    assert calls == []
+    assert replies[0] != WAKING_STORAGE_TEXT
+
+
+@pytest.mark.asyncio
+async def test_failed_preload_does_not_affect_replies(tmp_path, short_warmup_delay):
+    async def failing_warmup():
+        # Production warmup never raises; it reports and returns.
+        logging.getLogger("test.warmup").warning("Photo review warmup FAILED")
+
+    pipeline, _, replies = _build_warmup_pipeline(tmp_path, wake_warmup=failing_warmup)
+
+    def slow_probe():
+        time.sleep(0.05)
+
+    pipeline.storage_probe = slow_probe
+
+    status, _ = await _send(pipeline, {
+        **_BASE_DATA,
+        "msgtype": "text",
+        "text": {"content": "你好"},
+    })
+
+    assert status == AckMessage.STATUS_OK
+    assert replies[0] == WAKING_STORAGE_TEXT
+    assert len(replies) == 2
+
+
+@pytest.mark.asyncio
+async def test_wake_warmup_waits_for_probe_ready(monkeypatch):
+    calls = []
+
+    async def fake_warmup_model(config, logger=None):
+        calls.append(config.model)
+
+    monkeypatch.setattr(main_module, "warmup_model", fake_warmup_model)
+
+    config = ReviewConfig("http://gateway.local/v1", "sk-test", "test-model")
+    gate = main_module._ReviewGate()
+    logger = logging.getLogger("test.warmup")
+    wake = main_module._build_wake_warmup(config, gate, logger)
+
+    # Probe not finished (or failed): no preload.
+    await wake()
+    assert calls == []
+
+    gate.ready = True
+    await wake()
+    assert calls == ["test-model"]
+
+    # Review not configured at all: the gate alone must not trigger a request.
+    silent = main_module._build_wake_warmup(None, gate, logger)
+    await silent()
+    assert calls == ["test-model"]
 
 
 @pytest.mark.asyncio
