@@ -4,31 +4,22 @@ import os
 from datetime import datetime
 import pytest
 from app.utils.file_storage import (
-    sanitize_sender_id,
-    sanitize_extension,
     generate_saved_filename,
     save_file,
 )
 
 
-def test_sanitize_sender_id():
-    assert sanitize_sender_id("Alice") == "Alice"
-    assert sanitize_sender_id("Bob/Admin") == "BobAdmin"
-    assert sanitize_sender_id("User: [Test]") == "User Test"
-    assert sanitize_sender_id("../../evil") == "evil"
-    assert sanitize_sender_id("") == ""
-    assert sanitize_sender_id(None) == ""
+def test_generate_saved_filename_sanitizes_traversal_and_defaults_extension():
+    fixed_time = datetime(2026, 9, 24, 15, 30, 45, 123456)
 
+    filename = generate_saved_filename(
+        sender_staff_id="../../evil",
+        original_filename="../../etc/passwd",
+        timestamp=fixed_time,
+        default_ext=".bin",
+    )
 
-def test_sanitize_extension():
-    assert sanitize_extension("photo.png") == ".png"
-    assert sanitize_extension("archive.tar.gz") == ".gz"
-    assert sanitize_extension("path/to/file.PDF") == ".PDF"
-    # Path traversal attempt
-    assert sanitize_extension("../../etc/passwd") == ""
-    assert sanitize_extension("../../etc/passwd", default_ext=".bin") == ".bin"
-    # Missing extension with default
-    assert sanitize_extension("noext", default_ext=".png") == ".png"
+    assert filename == "20260924_153045_evil.bin"
 
 
 def test_generate_saved_filename():

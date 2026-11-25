@@ -16,8 +16,6 @@ from app.handlers.message import (
     MediaFileHandler,
     PipelineHandler,
     REVIEW_PREFIX,
-    _ReviewBatch,
-    _format_reviews,
 )
 from app.services.file_downloader import DownloadResult
 
@@ -106,95 +104,26 @@ def _callback(msgtype, content, conversation_type="1"):
     return callback
 
 
-async def _wait_for_reviews(handler):
-    """Wait until no review task is left (including deferred follow-ups)."""
-    while handler._review_tasks:
-        await asyncio.gather(*list(handler._review_tasks), return_exceptions=True)
-        await asyncio.sleep(0)
+async def _wait_for_replies(replies, count, timeout=2.0):
+    """Wait until *count* replies were delivered, observing only the reply stream."""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while len(replies) < count:
+        if loop.time() >= deadline:
+            raise AssertionError(
+                f"expected {count} replies, got {len(replies)}: {replies!r}"
+            )
+        await asyncio.sleep(0.005)
 
 
-# --- reply formatting ------------------------------------------------------
-
-
-def test_format_reviews_returns_none_when_empty():
-    assert _format_reviews({}) is None
-
-
-def test_format_reviews_keeps_single_review_unlabelled():
-    assert _format_reviews({2: "很棒"}) == "很棒"
-
-
-def test_format_reviews_labels_multiple_in_image_order():
-    assert _format_reviews({3: "c", 1: "a"}) == "图1：a\n图3：c"
-
-
-# --- review batch ----------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_review_batch_wait_keeps_stragglers_running():
-    gate = asyncio.Event()
-
-    class Reviewer:
-        async def review(self, path):
-            if path == "slow":
-                await gate.wait()
-                return "SLOW"
-            return "FAST"
-
-    batch = _ReviewBatch(Reviewer(), [(1, "fast"), (2, "slow")], total_timeout=1.0)
-    batch.start()
-
-    reviews, pending = await batch.wait(0.01)
-
-    assert reviews == {1: "FAST"}
-    assert len(pending) == 1
-
-    gate.set()
-    assert await batch.finish() == {1: "FAST", 2: "SLOW"}
-
-
-@pytest.mark.asyncio
-async def test_review_batch_finish_cancels_at_deadline(caplog):
-    block = asyncio.Event()
-
-    class Reviewer:
-        async def review(self, _path):
-            await block.wait()
-            return "late"
-
-    batch = _ReviewBatch(
-        Reviewer(),
-        [(1, "photo")],
-        total_timeout=0.02,
-        logger=logging.getLogger("file-bridge.test.review"),
-    )
-    batch.start()
-
-    with caplog.at_level(logging.WARNING, logger="file-bridge.test.review"):
-        assert await batch.finish() == {}
-
-    assert "cancelled after" in caplog.text
-
-
-@pytest.mark.asyncio
-async def test_review_batch_deadline_is_fixed_at_first_request():
-    class Reviewer:
-        async def review(self, _path):
-            return "ok"
-
-    batch = _ReviewBatch(Reviewer(), [], total_timeout=1.0)
-    batch.add(1, "first")
-    deadline = batch._deadline
-
-    # A later request (e.g. a slow group-chat download) must not extend the
-    # batch's shared deadline.
-    batch.add(2, "second")
-    batch.start()
-
-    assert deadline > 0
-    assert batch._deadline == deadline
-    await asyncio.gather(*batch._tasks, return_exceptions=True)
+async def _wait_for_log(caplog, text, timeout=2.0):
+    """Wait until *text* appears in captured logs, observing only log output."""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while text not in caplog.text:
+        if loop.time() >= deadline:
+            raise AssertionError(f"log {text!r} not seen: {caplog.text!r}")
+        await asyncio.sleep(0.005)
 
 
 # --- single photo ----------------------------------------------------------
@@ -208,7 +137,7 @@ async def test_review_within_window_merges_into_one_reply(tmp_path):
     await pipeline.process(
         _callback("picture", {"downloadCode": "code-1"})
     )
-    await _wait_for_reviews(handler)
+    await _wait_for_replies(replies, 1)
 
     assert len(replies) == 1
     assert "文件接收成功，已保存为:" in replies[0]
@@ -230,7 +159,7 @@ async def test_review_after_window_is_sent_as_prefixed_second_message(tmp_path):
     assert len(replies) == 1
     assert "构图很棒" not in replies[0]
 
-    await _wait_for_reviews(handler)
+    await _wait_for_replies(replies, 2)
 
     assert len(replies) == 2
     assert replies[1].startswith(REVIEW_PREFIX)
@@ -252,11 +181,71 @@ async def test_review_total_timeout_sends_only_one_reply(tmp_path, caplog):
 
     with caplog.at_level(logging.WARNING, logger="file-bridge.test.review"):
         await pipeline.process(_callback("picture", {"downloadCode": "code-1"}))
-        await _wait_for_reviews(handler)
+        await _wait_for_log(caplog, "cancelled after")
 
     assert len(replies) == 1
     assert "太晚了" not in replies[0]
     assert "cancelled after" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_review_deadline_is_fixed_at_first_request(tmp_path, caplog):
+    """A slow later download must not extend the batch's shared deadline.
+
+    The first photo's review blocks while the second download outlives the
+    whole review budget. The blocked review is cancelled at the shared
+    deadline and its text never reaches the chat.
+    """
+    block = asyncio.Event()
+
+    class Reviewer:
+        def __init__(self):
+            self.calls = 0
+
+        async def review(self, _path):
+            self.calls += 1
+            if self.calls == 1:
+                await block.wait()
+                return "first"
+            return None
+
+    counter = {"n": 0}
+
+    async def download(_url):
+        counter["n"] += 1
+        if counter["n"] == 2:
+            await asyncio.sleep(0.1)
+        path = tmp_path / f"temp_{counter['n']}.bin"
+        path.write_bytes(b"not really an image")
+        return DownloadResult(
+            temp_path=str(path),
+            sha256=f"sha-{counter['n']}",
+            file_size=19,
+        )
+
+    logger = logging.getLogger("file-bridge.test.review")
+    handler, pipeline, replies = _build_handler(
+        tmp_path,
+        Reviewer(),
+        merge_window=0.01,
+        review_timeout=0.05,
+        logger=logger,
+        download=download,
+    )
+
+    with caplog.at_level(logging.WARNING, logger="file-bridge.test.review"):
+        await pipeline.process(
+            _callback("richText", _rich_text(["c1", "c2"]), conversation_type="2")
+        )
+        await _wait_for_log(caplog, "cancelled after")
+
+    assert len(replies) == 1
+    assert "first" not in replies[0]
+
+    block.set()
+    await asyncio.sleep(0.01)
+
+    assert len(replies) == 1
 
 
 @pytest.mark.asyncio
@@ -265,7 +254,7 @@ async def test_review_failure_keeps_the_existing_single_reply(tmp_path):
     handler, pipeline, replies = _build_handler(tmp_path, reviewer)
 
     await pipeline.process(_callback("picture", {"downloadCode": "code-1"}))
-    await _wait_for_reviews(handler)
+    await _wait_for_replies(replies, 1)
 
     assert len(replies) == 1
     assert "文件接收成功，已保存为:" in replies[0]
@@ -279,7 +268,7 @@ async def test_video_and_file_are_never_reviewed(tmp_path):
 
     await pipeline.process(_callback("video", {"downloadCode": "video-1"}))
     await pipeline.process(_callback("file", {"downloadCode": "file-1"}))
-    await _wait_for_reviews(handler)
+    await _wait_for_replies(replies, 2)
 
     assert len(replies) == 2
     assert all(REVIEW_PREFIX not in text for text in replies)
@@ -301,7 +290,7 @@ async def test_group_reviews_merge_into_one_labelled_message(tmp_path):
     await pipeline.process(
         _callback("richText", _rich_text(["c1", "c2", "c3"]), conversation_type="2")
     )
-    await _wait_for_reviews(handler)
+    await _wait_for_replies(replies, 1)
 
     assert len(replies) == 1
     assert "图1：a" in replies[0]
@@ -347,7 +336,7 @@ async def test_group_reviews_start_before_later_downloads_finish(tmp_path):
     await pipeline.process(
         _callback("richText", _rich_text(["c1", "c2"]), conversation_type="2")
     )
-    await _wait_for_reviews(handler)
+    await _wait_for_replies(replies, 1)
 
     assert len(reviewer.calls) == 2
     assert len(replies) == 1
@@ -365,7 +354,7 @@ async def test_group_partial_failure_omits_the_failed_image(tmp_path):
     await pipeline.process(
         _callback("richText", _rich_text(["c1", "c2", "c3"]), conversation_type="2")
     )
-    await _wait_for_reviews(handler)
+    await _wait_for_replies(replies, 2)
 
     assert len(replies) == 2
     followup = replies[1]
@@ -385,7 +374,7 @@ async def test_group_all_failures_send_no_followup(tmp_path):
     await pipeline.process(
         _callback("richText", _rich_text(["c1", "c2"]), conversation_type="2")
     )
-    await _wait_for_reviews(handler)
+    await _wait_for_replies(replies, 1)
 
     assert len(replies) == 1
     assert REVIEW_PREFIX not in replies[0]
@@ -399,7 +388,6 @@ async def test_group_without_saved_images_starts_no_review(tmp_path):
     await pipeline.process(
         _callback("richText", {"richText": [{"text": "只发文字"}]}, conversation_type="2")
     )
-    await _wait_for_reviews(handler)
 
     assert replies == []
     assert reviewer.calls == []
@@ -416,7 +404,6 @@ async def test_disabled_review_keeps_single_reply(tmp_path):
 
     assert len(replies) == 1
     assert "文件接收成功，已保存为:" in replies[0]
-    assert handler._review_tasks == set()
 
 
 @pytest.mark.asyncio
@@ -426,7 +413,7 @@ async def test_disable_review_stops_reviews_after_probe_failure(tmp_path):
 
     handler.disable_review()
     await pipeline.process(_callback("picture", {"downloadCode": "code-1"}))
-    await _wait_for_reviews(handler)
+    await _wait_for_replies(replies, 1)
 
     assert len(replies) == 1
     assert reviewer.calls == []
@@ -444,6 +431,6 @@ async def test_cancel_tasks_drops_the_deferred_review(tmp_path):
     assert len(replies) == 1
 
     handler.cancel_tasks()
-    await _wait_for_reviews(handler)
+    await asyncio.sleep(0.01)
 
     assert len(replies) == 1

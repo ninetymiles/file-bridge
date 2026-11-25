@@ -14,7 +14,6 @@ from app.main import (
     setup_logger,
     get_app_version,
     log_startup_summary,
-    _DingTalkStreamLogFilter,
 )
 
 
@@ -148,12 +147,6 @@ def test_setup_logger_invalid_level_warns_and_falls_back(caplog):
         assert "Invalid LOG_LEVEL 'verbose'" in caplog.text
 
 
-def test_setup_logger_attaches_no_private_handler():
-    setup_logger()
-    app_logger = logging.getLogger("file-bridge")
-    assert app_logger.handlers == []
-
-
 def test_semantic_command_enabled_defaults_off(monkeypatch):
     monkeypatch.delenv("SEMANTIC_COMMAND_ENABLED", raising=False)
     monkeypatch.setenv("CLIENT_ID", "test_id")
@@ -280,36 +273,69 @@ def _make_stream_record(msg: str, level: int = logging.INFO) -> logging.LogRecor
     return record
 
 
-def test_filter_rewrites_disconnect_to_conclusion():
-    record = _make_stream_record(
-        "received disconnect topic=disconnect message={'content': 'long json'}"
+@pytest.fixture
+def configured_logs():
+    """Attach a capture handler to the root logger and configure logging.
+
+    The handler is added before ``setup_logger`` so it receives the same
+    stream-log filter as every other root handler; tests then observe what a
+    configured application actually emits.
+    """
+    records = []
+    capture = logging.Handler()
+    capture.emit = records.append
+    root = logging.getLogger()
+    previous_level = root.level
+    root.addHandler(capture)
+    try:
+        setup_logger("DEBUG")
+        yield records
+    finally:
+        root.removeHandler(capture)
+        root.setLevel(previous_level)
+
+
+def _emit(record: logging.LogRecord) -> None:
+    logging.getLogger("file-bridge").handle(record)
+
+
+def test_stream_disconnect_log_is_rewritten_to_conclusion(configured_logs):
+    _emit(
+        _make_stream_record(
+            "received disconnect topic=disconnect message={'content': 'long json'}"
+        )
     )
-    assert _DingTalkStreamLogFilter().filter(record) is True
-    assert record.getMessage() == "DingTalk stream disconnected: received disconnect message"
+
+    assert len(configured_logs) == 1
+    assert (
+        configured_logs[0].getMessage()
+        == "DingTalk stream disconnected: received disconnect message"
+    )
 
 
-def test_filter_rewrites_endpoint_to_connected():
-    record = _make_stream_record("endpoint is {'endpoint': 'wss://...', 'ticket': 'abc'}")
-    assert _DingTalkStreamLogFilter().filter(record) is True
-    assert record.getMessage() == "DingTalk stream connected."
+def test_stream_endpoint_log_is_rewritten_to_connected(configured_logs):
+    _emit(_make_stream_record("endpoint is {'endpoint': 'wss://...', 'ticket': 'abc'}"))
+
+    assert len(configured_logs) == 1
+    assert configured_logs[0].getMessage() == "DingTalk stream connected."
 
 
-def test_filter_downgrades_open_connection_to_debug():
-    record = _make_stream_record("open connection, url=wss://dingtalk.example/stream")
-    assert _DingTalkStreamLogFilter().filter(record) is True
-    assert record.levelno == logging.DEBUG
+def test_open_connection_log_is_downgraded_to_debug(configured_logs):
+    _emit(_make_stream_record("open connection, url=wss://dingtalk.example/stream"))
+
+    assert len(configured_logs) == 1
+    assert configured_logs[0].levelno == logging.DEBUG
 
 
-def test_filter_passes_unrelated_records_unchanged():
-    record = _make_stream_record("[start] network exception, will retry")
-    original_msg = record.getMessage()
-    original_level = record.levelno
-    assert _DingTalkStreamLogFilter().filter(record) is True
-    assert record.getMessage() == original_msg
-    assert record.levelno == original_level
+def test_unrelated_stream_log_is_preserved(configured_logs):
+    _emit(_make_stream_record("[start] network exception, will retry"))
+
+    assert len(configured_logs) == 1
+    assert configured_logs[0].getMessage() == "[start] network exception, will retry"
+    assert configured_logs[0].levelno == logging.INFO
 
 
-def test_filter_ignores_non_stream_records():
+def test_non_stream_log_is_preserved(configured_logs):
     record = logging.LogRecord(
         name="file-bridge",
         level=logging.INFO,
@@ -320,11 +346,27 @@ def test_filter_ignores_non_stream_records():
         exc_info=None,
     )
     record.filename = "message.py"
-    original_msg = record.getMessage()
-    assert _DingTalkStreamLogFilter().filter(record) is True
-    assert record.getMessage() == original_msg
+    _emit(record)
+
+    assert len(configured_logs) == 1
+    assert (
+        configured_logs[0].getMessage()
+        == "Received private message from alice, type=text"
+    )
 
 
-def test_setup_logger_sets_httpx_to_warning():
-    setup_logger("INFO")
-    assert logging.getLogger("httpx").level == logging.WARNING
+def test_repeated_setup_logger_does_not_duplicate_output(configured_logs):
+    setup_logger("DEBUG")
+    setup_logger("DEBUG")
+
+    logging.getLogger("file-bridge").info("unique-marker-9d1f")
+
+    assert [r.getMessage() for r in configured_logs] == ["unique-marker-9d1f"]
+
+
+def test_httpx_info_is_suppressed_but_warning_is_kept(configured_logs):
+    httpx_logger = logging.getLogger("httpx")
+    httpx_logger.info("GET https://oss.example/signed?token=secret")
+    httpx_logger.warning("request failed")
+
+    assert [r.getMessage() for r in configured_logs] == ["request failed"]

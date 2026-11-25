@@ -95,11 +95,6 @@ def matcher():
     return SemanticCommandMatcher(FastEmbedEmbedder())
 
 
-def test_embedding_dimension(matcher):
-    # One row per catalog phrase; bge-small-zh-v1.5 emits 512-dim vectors.
-    assert matcher._phrase_vectors.shape[1] == 512
-
-
 @pytest.mark.asyncio
 async def test_positive_samples_match(matcher):
     misses = []

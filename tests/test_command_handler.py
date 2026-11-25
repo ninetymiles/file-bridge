@@ -216,6 +216,32 @@ async def test_command_handler_empty_mention_gets_guide_without_prefix():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "segments, expected_text",
+    [
+        # An @ mention after the text is stripped like one before it.
+        ([{"text": "重建索引"}, {"text": "@FileBridge"}], "重建索引"),
+        # Private chat carries no @ mention at all; text still merges.
+        ([{"text": "重建索引"}], "重建索引"),
+        # Adjacent text segments are concatenated before matching.
+        ([{"text": "重建"}, {"text": "索引"}], "重建索引"),
+    ],
+)
+async def test_command_handler_rich_text_merges_segments_before_matching(
+    segments, expected_text
+):
+    handler, matcher, action, pipeline = _handler("rebuild_index")
+    raw_data = {"msgtype": "richText", "content": {"richText": segments}}
+    msg = ChatbotMessage.from_dict(raw_data)
+
+    handled = await handler.handle(msg, raw_data, pipeline)
+
+    assert handled is not None
+    assert handled.tier == ReplyTier.PRIMARY
+    assert matcher.received_texts == [expected_text]
+
+
+@pytest.mark.asyncio
 async def test_command_handler_text_only_richtext_gets_guide():
     handler, matcher, action, pipeline = _handler(None)
     raw_data = {
@@ -265,47 +291,3 @@ def test_build_guide_reply_empty_text_has_no_prefix(monkeypatch):
     assert reply.startswith(GUIDE_BODY_TEMPLATES[0].split("\n", 1)[0])
     assert reply.endswith(GUIDE_ENDING_TEXTS[0])
 
-
-def test_merge_rich_text_strips_at_prefix():
-    segments = [
-        {"text": "@FileBridge"},
-        {"text": "重建索引"},
-        {"text": "\n"},
-        {"type": "picture", "downloadCode": "code1"},
-    ]
-    merged, has_picture = CommandHandler._merge_rich_text(segments)
-    assert merged == "重建索引\n<img1>"
-    assert has_picture is True
-
-
-def test_merge_rich_text_strips_at_suffix():
-    segments = [
-        {"type": "picture", "downloadCode": "code1"},
-        {"text": "\n"},
-        {"text": "@FileBridge"},
-    ]
-    merged, has_picture = CommandHandler._merge_rich_text(segments)
-    assert merged == "<img1>\n"
-    assert has_picture is True
-
-
-def test_merge_rich_text_private_chat_no_at():
-    segments = [
-        {"type": "picture", "downloadCode": "code1"},
-        {"text": "\n"},
-        {"type": "picture", "downloadCode": "code2"},
-    ]
-    merged, has_picture = CommandHandler._merge_rich_text(segments)
-    assert merged == "<img1>\n<img2>"
-    assert has_picture is True
-
-
-def test_merge_rich_text_text_only():
-    segments = [
-        {"text": "hello"},
-        {"text": " "},
-        {"text": "world"},
-    ]
-    merged, has_picture = CommandHandler._merge_rich_text(segments)
-    assert merged == "hello world"
-    assert has_picture is False

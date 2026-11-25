@@ -8,6 +8,7 @@ missed check or a duplicate trigger.
 
 import asyncio
 import logging
+from collections.abc import Awaitable, Callable
 from datetime import datetime, timedelta
 from typing import Optional
 
@@ -31,12 +32,19 @@ class DailyReportScheduler:
         notifier: Optional[LifecycleNotifier] = None,
         logger: Optional[logging.Logger] = None,
         last_check: Optional[datetime] = None,
+        *,
+        clock: Optional[Callable[[], datetime]] = None,
+        sleep: Optional[Callable[[float], Awaitable[None]]] = None,
     ):
         self.metadata_store = metadata_store
         self.notifier = notifier
         self.logger = logger or logging.getLogger("file-bridge.daily-report")
+        # Injectable time source and sleeper keep the 09:00 loop testable
+        # through the public start()/stop() API; defaults preserve behaviour.
+        self._clock = clock or datetime.now
+        self._sleep = sleep or asyncio.sleep
         # Baseline lives in memory only; a restart re-baselines to now.
-        self.last_check: datetime = last_check or datetime.now()
+        self.last_check: datetime = last_check or self._clock()
         self._task: Optional[asyncio.Task] = None
 
     def start(self) -> None:
@@ -72,7 +80,7 @@ class DailyReportScheduler:
         previous_check = self.last_check
         last_check_str = previous_check.strftime("%Y-%m-%d %H:%M:%S")
         delta_stats = await self.metadata_store.async_count_new_since(last_check_str)
-        self.last_check = datetime.now()
+        self.last_check = self._clock()
 
         if delta_stats.total_files == 0:
             self.logger.info("Daily check: no new files since %s", last_check_str)
@@ -100,16 +108,16 @@ class DailyReportScheduler:
         """Sleep-capped loop that triggers run_daily_check at each 09:00."""
         while True:
             try:
-                now = datetime.now()
+                now = self._clock()
                 next_run = self._next_daily_check(now)
                 sleep_seconds = min(
                     (next_run - now).total_seconds(), MAX_SLEEP_SECONDS
                 )
                 if sleep_seconds > 0:
-                    await asyncio.sleep(sleep_seconds)
+                    await self._sleep(sleep_seconds)
 
                 # Reach-or-exceed: fire once the scheduled time has passed.
-                if datetime.now() >= next_run:
+                if self._clock() >= next_run:
                     await self.run_daily_check()
             except asyncio.CancelledError:
                 raise

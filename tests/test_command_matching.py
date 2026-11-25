@@ -23,8 +23,8 @@ from app.services.command_matching import (  # noqa: E402
 )
 from app.services.command_matching.semantic import (  # noqa: E402
     DEFAULT_MODEL_CACHE_DIR,
-    FastEmbedEmbedder,
     SemanticCommandMatcher,
+    resolve_model_cache_dir,
 )
 
 _SEMANTIC_MODULE_PATH = "app.services.command_matching.semantic"
@@ -145,26 +145,24 @@ def _catalog_with_two_commands():
 
 
 @pytest.mark.parametrize("env_mode", ["unset", "empty"])
-def test_embedder_defaults_to_project_cache_dir(monkeypatch, env_mode):
+def test_model_cache_dir_defaults_to_project_cache(monkeypatch, env_mode):
     if env_mode == "unset":
         monkeypatch.delenv("FASTEMBED_CACHE_PATH", raising=False)
     else:
         monkeypatch.setenv("FASTEMBED_CACHE_PATH", "")
 
-    embedder = FastEmbedEmbedder()
+    resolved = resolve_model_cache_dir()
 
-    assert embedder._model.init_kwargs["cache_dir"] == str(DEFAULT_MODEL_CACHE_DIR)
-    assert DEFAULT_MODEL_CACHE_DIR.is_absolute()
-    assert DEFAULT_MODEL_CACHE_DIR.name == "cache"
+    assert resolved == DEFAULT_MODEL_CACHE_DIR
+    assert resolved.is_absolute()
+    assert resolved.name == "cache"
 
 
-def test_embedder_env_overrides_cache_dir(monkeypatch, tmp_path):
+def test_model_cache_dir_env_override(monkeypatch, tmp_path):
     custom_cache = tmp_path / "custom-model-cache"
     monkeypatch.setenv("FASTEMBED_CACHE_PATH", str(custom_cache))
 
-    embedder = FastEmbedEmbedder()
-
-    assert embedder._model.init_kwargs["cache_dir"] == str(custom_cache)
+    assert resolve_model_cache_dir() == custom_cache
 
 
 @pytest.mark.asyncio

@@ -3,7 +3,7 @@
 import logging
 
 import pytest
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import MagicMock
 from dingtalk_stream import CallbackMessage, AckMessage, ChatbotMessage
 from app.handlers import BaseMessageHandler, PipelineHandler, ReplyIntent
 
@@ -112,99 +112,148 @@ async def test_async_reply_text_sends_before_logging():
     assert call_names.index("reply") < call_names.index("info")
 
 
+class _EventLogHandler(logging.Handler):
+    """Record application log messages into a shared event list."""
+
+    def __init__(self, events):
+        super().__init__(level=logging.INFO)
+        self.events = events
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self.events.append(("log", record.getMessage()))
+
+
+def _callback(raw_data: dict) -> CallbackMessage:
+    callback = CallbackMessage()
+    callback.data = raw_data
+    return callback
+
+
 @pytest.mark.asyncio
-async def test_dispatch_runs_storage_warmup_before_first_info_log(monkeypatch):
-    """ensure_storage_ready must run before any INFO log in the chain.
+async def test_storage_warmup_runs_before_first_info_log():
+    """The storage probe must finish before the receive-summary INFO log.
 
     Locks the cold-disk invariant: the 3s wake timer is registered inside
     ensure_storage_ready, so it must precede the receive-summary INFO log
     (whose synchronous disk write could otherwise stall the timer).
     """
-    pipeline = PipelineHandler()
-    order = MagicMock()
-    order.attach_mock(AsyncMock(), "warmup")
-    order.attach_mock(MagicMock(), "log_received")
+    events = []
+    pipeline = PipelineHandler(logger=logging.getLogger("file-bridge"))
+    pipeline.reply_text = MagicMock(return_value={"errcode": 0})
+    pipeline.storage_probe = lambda: events.append(("probe", None))
 
-    import app.handlers.message as message_mod
-    pipeline.storage_probe = MagicMock()
-    monkeypatch.setattr(message_mod, "ensure_storage_ready", order.warmup)
-    pipeline._log_received_message = order.log_received
+    handler = _EventLogHandler(events)
+    app_logger = logging.getLogger("file-bridge")
+    previous_level = app_logger.level
+    app_logger.setLevel(logging.INFO)
+    app_logger.addHandler(handler)
+    try:
+        await pipeline.process(
+            _callback(
+                {
+                    "msgtype": "text",
+                    "text": {"content": "hi"},
+                    "senderNick": "alice",
+                    "conversationType": "1",
+                }
+            )
+        )
+    finally:
+        app_logger.removeHandler(handler)
+        app_logger.setLevel(previous_level)
 
-    callback = CallbackMessage()
-    callback.data = {"msgtype": "text", "text": {"content": "hi"}, "conversationType": "1"}
-
-    await pipeline._dispatch(callback)
-
-    call_names = [c[0] for c in order.mock_calls]
-    assert call_names.index("warmup") < call_names.index("log_received")
+    kinds = [kind for kind, _ in events]
+    assert kinds.index("probe") < kinds.index("log")
+    first_log = next(message for kind, message in events if kind == "log")
+    assert first_log.startswith("Received private message from alice")
 
 
 @pytest.fixture
 def pipeline_with_logger():
-    return PipelineHandler(logger=logging.getLogger("file-bridge"))
+    pipeline = PipelineHandler(logger=logging.getLogger("file-bridge"))
+    pipeline.reply_text = MagicMock(return_value={"errcode": 0})
+    return pipeline
 
 
-def test_received_text_includes_content_in_info(caplog, pipeline_with_logger):
-    raw_data = {
-        "msgtype": "text",
-        "text": {"content": "重建索引"},
-        "senderNick": "alice",
-        "conversationType": "1",
-    }
-    message = ChatbotMessage.from_dict(raw_data)
+async def _info_messages(caplog, pipeline, raw_data) -> str:
     with caplog.at_level(logging.INFO, logger="file-bridge"):
-        pipeline_with_logger._log_received_message(message, raw_data)
-    info_text = "\n".join(r.message for r in caplog.records if r.levelno == logging.INFO)
+        await pipeline.process(_callback(raw_data))
+    return "\n".join(r.message for r in caplog.records if r.levelno == logging.INFO)
+
+
+@pytest.mark.asyncio
+async def test_received_text_includes_content_in_info(caplog, pipeline_with_logger):
+    info_text = await _info_messages(
+        caplog,
+        pipeline_with_logger,
+        {
+            "msgtype": "text",
+            "text": {"content": "重建索引"},
+            "senderNick": "alice",
+            "conversationType": "1",
+        },
+    )
+
     assert "content=重建索引" in info_text
     # downloadCode must not leak into INFO.
     assert "downloadCode" not in info_text
 
 
-def test_received_richtext_includes_merged_content_in_info(caplog, pipeline_with_logger):
-    raw_data = {
-        "msgtype": "richText",
-        "content": {
-            "richText": [
-                {"text": "重建索引 "},
-                {"downloadCode": "dc_pic", "type": "picture"},
-            ]
+@pytest.mark.asyncio
+async def test_received_richtext_includes_merged_content_in_info(
+    caplog, pipeline_with_logger
+):
+    info_text = await _info_messages(
+        caplog,
+        pipeline_with_logger,
+        {
+            "msgtype": "richText",
+            "content": {
+                "richText": [
+                    {"text": "重建索引 "},
+                    {"downloadCode": "dc_pic", "type": "picture"},
+                ]
+            },
+            "senderNick": "alice",
+            "conversationType": "1",
         },
-        "senderNick": "alice",
-        "conversationType": "1",
-    }
-    message = ChatbotMessage.from_dict(raw_data)
-    with caplog.at_level(logging.INFO, logger="file-bridge"):
-        pipeline_with_logger._log_received_message(message, raw_data)
-    info_text = "\n".join(r.message for r in caplog.records if r.levelno == logging.INFO)
+    )
+
     assert "content=重建索引 <img1>" in info_text
     assert "downloadCode" not in info_text
 
 
-def test_received_richtext_picture_only_content_is_img1(caplog, pipeline_with_logger):
-    raw_data = {
-        "msgtype": "richText",
-        "content": {"richText": [{"downloadCode": "dc_only", "type": "picture"}]},
-        "senderNick": "alice",
-        "conversationType": "1",
-    }
-    message = ChatbotMessage.from_dict(raw_data)
-    with caplog.at_level(logging.INFO, logger="file-bridge"):
-        pipeline_with_logger._log_received_message(message, raw_data)
-    info_text = "\n".join(r.message for r in caplog.records if r.levelno == logging.INFO)
+@pytest.mark.asyncio
+async def test_received_richtext_picture_only_content_is_img1(
+    caplog, pipeline_with_logger
+):
+    info_text = await _info_messages(
+        caplog,
+        pipeline_with_logger,
+        {
+            "msgtype": "richText",
+            "content": {"richText": [{"downloadCode": "dc_only", "type": "picture"}]},
+            "senderNick": "alice",
+            "conversationType": "1",
+        },
+    )
+
     assert "content=<img1>" in info_text
     assert "downloadCode" not in info_text
 
 
-def test_received_picture_has_no_content_field(caplog, pipeline_with_logger):
-    raw_data = {
-        "msgtype": "picture",
-        "content": {"downloadCode": "dc_pic"},
-        "senderNick": "alice",
-        "conversationType": "1",
-    }
-    message = ChatbotMessage.from_dict(raw_data)
-    with caplog.at_level(logging.INFO, logger="file-bridge"):
-        pipeline_with_logger._log_received_message(message, raw_data)
-    info_text = "\n".join(r.message for r in caplog.records if r.levelno == logging.INFO)
+@pytest.mark.asyncio
+async def test_received_picture_has_no_content_field(caplog, pipeline_with_logger):
+    info_text = await _info_messages(
+        caplog,
+        pipeline_with_logger,
+        {
+            "msgtype": "picture",
+            "content": {"downloadCode": "dc_pic"},
+            "senderNick": "alice",
+            "conversationType": "1",
+        },
+    )
+
     assert "content=" not in info_text
     assert "downloadCode" not in info_text

@@ -343,6 +343,32 @@ def _send(pipeline, data):
     return pipeline.process(callback)
 
 
+class _ReceivedLogHandler(logging.Handler):
+    """Record only the pipeline's receive-summary log line."""
+
+    def __init__(self, events):
+        super().__init__(level=logging.INFO)
+        self.events = events
+
+    def emit(self, record: logging.LogRecord) -> None:
+        if record.getMessage().startswith("Received "):
+            self.events.append("log_received")
+
+
+def _attach_received_log(pipeline, events):
+    handler = _ReceivedLogHandler(events)
+    logger = pipeline.logger
+    previous_level = logger.level
+    logger.setLevel(logging.INFO)
+    logger.addHandler(handler)
+    return handler, logger, previous_level
+
+
+def _detach_received_log(handler, logger, previous_level):
+    logger.removeHandler(handler)
+    logger.setLevel(previous_level)
+
+
 _BASE_DATA = {
     "senderNick": "Tester",
     "senderId": "user_100",
@@ -364,13 +390,7 @@ async def test_slow_probe_sends_waking_notice_before_logs_and_final_reply(
 
     pipeline.storage_probe = slow_probe
 
-    original_log = pipeline._log_received_message
-
-    def log_spy(message, raw_data):
-        events.append("log_received")
-        return original_log(message, raw_data)
-
-    pipeline._log_received_message = log_spy
+    handler, logger, previous_level = _attach_received_log(pipeline, events)
 
     base_reply = pipeline.reply_text
 
@@ -380,11 +400,14 @@ async def test_slow_probe_sends_waking_notice_before_logs_and_final_reply(
 
     pipeline.reply_text = timed_reply
 
-    status, _ = await _send(pipeline, {
-        **_BASE_DATA,
-        "msgtype": "text",
-        "text": {"content": "你好"},
-    })
+    try:
+        status, _ = await _send(pipeline, {
+            **_BASE_DATA,
+            "msgtype": "text",
+            "text": {"content": "你好"},
+        })
+    finally:
+        _detach_received_log(handler, logger, previous_level)
 
     assert status == AckMessage.STATUS_OK
     assert len(replies) == 2
@@ -425,18 +448,21 @@ async def test_probe_failure_replies_unavailable_and_skips_pipeline(tmp_path):
 
     pipeline.storage_probe = broken_probe
 
-    log_calls = []
-    pipeline._log_received_message = lambda message, raw_data: log_calls.append(1)
+    log_events = []
+    handler, logger, previous_level = _attach_received_log(pipeline, log_events)
 
-    status, _ = await _send(pipeline, {
-        **_BASE_DATA,
-        "msgtype": "text",
-        "text": {"content": "重建索引"},
-    })
+    try:
+        status, _ = await _send(pipeline, {
+            **_BASE_DATA,
+            "msgtype": "text",
+            "text": {"content": "重建索引"},
+        })
+    finally:
+        _detach_received_log(handler, logger, previous_level)
 
     assert status == AckMessage.STATUS_OK
     assert replies == [STORAGE_UNAVAILABLE_TEXT]
-    assert log_calls == []
+    assert log_events == []
 
 
 @pytest.mark.asyncio

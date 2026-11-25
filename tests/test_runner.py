@@ -10,12 +10,15 @@ from app.core.runner import BotService
 @pytest.mark.asyncio
 async def test_service_lifecycle_and_graceful_shutdown():
     client = MagicMock()
-    # Mock client.start to hang until cancelled
+    cancelled = asyncio.Event()
+
+    # Mock client.start to hang until cancelled.
     async def mock_start():
         try:
             await asyncio.Event().wait()
         except asyncio.CancelledError:
-            pass
+            cancelled.set()
+            raise
 
     client.start = mock_start
     client.stop = AsyncMock()
@@ -43,30 +46,35 @@ async def test_service_lifecycle_and_graceful_shutdown():
 
     # Spec: shutdown cancels the runner task; the SDK client is never
     # stopped directly (SDK 0.24.3 has no stop() API).
-    assert service._runner_task.done()
+    assert cancelled.is_set()
     client.stop.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_service_signal_handlers_registered():
+async def test_service_registers_sigint_and_sigterm_handlers():
     client = MagicMock()
     client.start = AsyncMock()
-    logger = MagicMock()
-
-    service = BotService(client=client, logger=logger)
+    client.websocket = None
+    service = BotService(client=client, logger=MagicMock())
 
     loop = asyncio.get_running_loop()
     with patch.object(loop, "add_signal_handler") as mock_add_signal:
-        service._setup_signal_handlers(loop)
+        await service.start()
         registered_sigs = [call.args[0] for call in mock_add_signal.call_args_list]
         assert signal.SIGINT in registered_sigs
         assert signal.SIGTERM in registered_sigs
+
+        service.request_stop("SIGINT")
+        await service.stop()
 
 
 @pytest.mark.asyncio
 async def test_service_without_notifier():
     client = MagicMock()
+    started = asyncio.Event()
+
     async def mock_start():
+        started.set()
         await asyncio.Event().wait()
 
     client.start = mock_start
@@ -77,12 +85,12 @@ async def test_service_without_notifier():
     service = BotService(client=client, notifier=None, logger=logger)
 
     run_task = asyncio.create_task(service.start_and_wait())
-    await asyncio.sleep(0.01)
+    await asyncio.wait_for(started.wait(), timeout=1.0)
 
     service.request_stop("SIGINT")
     await asyncio.wait_for(run_task, timeout=2.0)
 
-    assert service._runner_task.done()
+    client.stop.assert_not_awaited()
 
 
 def test_run_forever_handles_exit():
@@ -97,16 +105,18 @@ def test_run_forever_handles_exit():
 
 
 @pytest.mark.asyncio
-async def test_shutdown_cancels_runner_task_without_client_stop():
+async def test_shutdown_cancels_sdk_task_without_client_stop():
     """Spec: shutdown cancels the runner task within a bounded wait; the
     SDK client is never stopped directly (SDK 0.24.3 has no stop() API
     and no _stop_event attribute)."""
     client = MagicMock()
+    cancelled = asyncio.Event()
 
     async def mock_start():
         try:
             await asyncio.Event().wait()
         except asyncio.CancelledError:
+            cancelled.set()
             raise
 
     client.start = mock_start
@@ -125,7 +135,7 @@ async def test_shutdown_cancels_runner_task_without_client_stop():
     service.request_stop("SIGINT")
     await asyncio.wait_for(run_task, timeout=2.0)
 
-    assert service._runner_task.cancelled()
+    assert cancelled.is_set()
     client.stop.assert_not_awaited()
 
 
@@ -134,7 +144,8 @@ def test_request_stop_raises_on_second_signal():
     client = MagicMock()
     service = BotService(client=client, logger=MagicMock())
 
-    service._is_shutting_down = True  # Simulate already shutting down
+    # First request starts the graceful shutdown and returns normally.
+    service.request_stop("SIGINT")
 
     with pytest.raises(KeyboardInterrupt):
         service.request_stop("SIGINT")
@@ -178,7 +189,7 @@ async def test_shutdown_completes_when_offline_notify_throws():
 
     # Should complete without raising the RuntimeError
     await asyncio.wait_for(run_task, timeout=2.0)
-    assert service._runner_task.done()
+    notifier.send_offline_notification.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -197,12 +208,12 @@ async def test_start_is_idempotent():
     service = BotService(client=client, notifier=notifier, logger=MagicMock())
 
     await service.start()
-    first_runner_task = service._runner_task
-
-    # Second call must be a no-op
     await service.start()
-    assert service._runner_task is first_runner_task
-    # Online notification should have been sent exactly once
+    await asyncio.sleep(0)
+
+    # The SDK runner is launched exactly once and the online notification is
+    # sent exactly once; a second start() is a no-op.
+    client.start.assert_awaited_once()
     notifier.send_online_notification.assert_awaited_once()
 
     # Cleanup

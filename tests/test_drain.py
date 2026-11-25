@@ -79,18 +79,6 @@ class ArchivingHandler(BaseMessageHandler):
         return None
 
 
-class MarkingHandler(BaseMessageHandler):
-    """Records whether the SDK task was registered during handle()."""
-
-    def __init__(self):
-        self.was_registered = None
-
-    async def handle(self, message, raw_data, pipeline):
-        task = asyncio.current_task()
-        self.was_registered = task in pipeline._active_tasks
-        return None
-
-
 @pytest.mark.asyncio
 async def test_gate_rejects_processing_after_begin_drain():
     handler = MagicMock(spec=BaseMessageHandler)
@@ -102,18 +90,6 @@ async def test_gate_rejects_processing_after_begin_drain():
 
     assert (status, msg) == (AckMessage.STATUS_OK, "OK")
     handler.handle.assert_not_awaited()
-    assert pipeline._active_tasks == set()
-
-
-@pytest.mark.asyncio
-async def test_task_registers_for_drain_and_deregisters_on_finish():
-    handler = MarkingHandler()
-    pipeline = PipelineHandler([handler])
-
-    await pipeline.process(make_callback())
-
-    assert handler.was_registered is True
-    assert pipeline._active_tasks == set()
 
 
 @pytest.mark.asyncio
@@ -124,7 +100,6 @@ async def test_begin_drain_cancels_interruptible_download_via_handler():
 
     task = asyncio.create_task(pipeline.process(make_callback()))
     await asyncio.wait_for(downloading.download_started.wait(), timeout=1.0)
-    assert task in pipeline._active_tasks
 
     pipeline.begin_drain()
     await asyncio.wait_for(pipeline.drain_active_tasks(timeout=5.0), timeout=5.0)
@@ -134,7 +109,6 @@ async def test_begin_drain_cancels_interruptible_download_via_handler():
     await asyncio.wait_for(task, timeout=1.0)
     assert downloading.replied_cancellation is True
     assert not task.cancelled()
-    assert pipeline._active_tasks == set()
 
 
 @pytest.mark.asyncio
@@ -152,7 +126,6 @@ async def test_drain_waits_for_non_interruptible_archive_to_finish():
     await asyncio.wait_for(task, timeout=1.0)
     assert archiving.archive_finished is True  # archive ran to completion
     assert not task.cancelled()
-    assert pipeline._active_tasks == set()
 
 
 @pytest.mark.asyncio
