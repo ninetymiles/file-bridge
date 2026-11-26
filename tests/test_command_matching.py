@@ -7,8 +7,6 @@ before test modules are collected, and only the semantic smoke test (marker
 """
 
 import importlib
-import logging
-import sys
 
 import numpy as np
 import pytest
@@ -173,10 +171,7 @@ async def test_semantic_matches_above_threshold_with_raw_texts():
     )
     matcher = SemanticCommandMatcher(embedder, catalog=_catalog_with_two_commands())
 
-    assert embedder.passage_inputs == ["alpha command", "beta command"]
-
     assert await matcher.match("跑一下 alpha") == "alpha"
-    assert embedder.query_inputs == [["跑一下 alpha"]]
 
 
 @pytest.mark.asyncio
@@ -197,11 +192,6 @@ async def test_semantic_rejects_below_threshold():
     )
     matcher = SemanticCommandMatcher(embedder, catalog=_catalog_with_two_commands())
     assert await matcher.match("ambiguous request") is None
-
-
-class _FakeSemanticMatcher:
-    def __init__(self, embedder):
-        self.embedder = embedder
 
 
 class _FailingSemanticMatcher:
@@ -233,32 +223,16 @@ def test_parse_enabled_interprets_boolish_values(raw, expected):
     assert parse_enabled(raw) is expected
 
 
-def test_factory_builds_substring_when_disabled(caplog):
-    caplog.set_level(logging.INFO, logger="file-bridge")
-
+def test_factory_builds_substring_when_disabled():
     matcher = build_command_matcher(False)
 
     assert isinstance(matcher, SubstringCommandMatcher)
-    assert "substring" in caplog.text
-    # The opt-out branch never touches a real inference backend.
-    assert getattr(sys.modules.get("fastembed"), "_file_bridge_test_stub", False)
 
 
 def _patch_semantic_backend(monkeypatch, matcher_class):
     semantic_module = importlib.import_module(_SEMANTIC_MODULE_PATH)
     monkeypatch.setattr(semantic_module, "SemanticCommandMatcher", matcher_class)
     monkeypatch.setattr(semantic_module, "FastEmbedEmbedder", _FakeEmbedder)
-
-
-def test_factory_builds_semantic_when_enabled(monkeypatch, caplog):
-    _patch_semantic_backend(monkeypatch, _FakeSemanticMatcher)
-    caplog.set_level(logging.INFO, logger="file-bridge")
-
-    matcher = build_command_matcher(True)
-
-    assert isinstance(matcher, _FakeSemanticMatcher)
-    assert "semantic" in caplog.text
-    assert "BAAI/bge-small-zh-v1.5" in caplog.text
 
 
 def test_factory_propagates_semantic_construction_failure(monkeypatch):

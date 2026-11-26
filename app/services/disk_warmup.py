@@ -24,6 +24,11 @@ async def ensure_storage_ready(
     ``on_waking`` is awaited (the caller sends its notice) and the probe is
     then awaited to completion. Probe exceptions propagate to the caller.
 
+    ``on_waking`` must complete the user-facing send before writing any local
+    log record: on a cold disk that write would delay the notice. The
+    send-before-log order is a contract in the storage-warmup spec and has no
+    automated test, so keep it explicit when changing this callback.
+
     wait_for is not usable here: its timeout cancels the awaited object, and
     to_thread cannot cancel the underlying thread, which would leave the
     probe running with an unretrieved exception.

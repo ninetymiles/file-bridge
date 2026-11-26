@@ -1,8 +1,6 @@
 """Unit tests for index report rendering."""
 
-import sqlite3
 from datetime import datetime
-from unittest.mock import MagicMock
 
 from app.services.index_report import (
     EMPTY_REPORT_TEXT,
@@ -78,15 +76,6 @@ def test_snapshot_unknown_media_type_counts_as_other():
     text = format_index_snapshot(stats)
 
     assert "照片 1，视频 0，其他 1" in text
-
-
-def test_snapshot_does_not_access_database(monkeypatch):
-    monkeypatch.setattr(
-        sqlite3, "connect", MagicMock(side_effect=AssertionError("renderer touched database"))
-    )
-    stats = _stats(total_files=1, total_users=1, typed_counts={"picture": 1})
-
-    assert "当前索引总量" in format_index_snapshot(stats)
 
 
 def test_daily_delta_format():

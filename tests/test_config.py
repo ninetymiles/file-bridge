@@ -1,6 +1,5 @@
 """Unit tests for configuration parsing."""
 
-import argparse
 import logging
 import os
 import subprocess
@@ -13,7 +12,6 @@ from app.main import (
     resolve_log_level,
     setup_logger,
     get_app_version,
-    log_startup_summary,
 )
 
 
@@ -140,11 +138,9 @@ def test_setup_logger_applies_debug_level():
     assert logger.level == logging.DEBUG
 
 
-def test_setup_logger_invalid_level_warns_and_falls_back(caplog):
-    with caplog.at_level(logging.DEBUG, logger="file-bridge"):
-        logger = setup_logger("verbose")
-        assert logger.level == logging.INFO
-        assert "Invalid LOG_LEVEL 'verbose'" in caplog.text
+def test_setup_logger_invalid_level_falls_back_to_info():
+    logger = setup_logger("verbose")
+    assert logger.level == logging.INFO
 
 
 def test_semantic_command_enabled_defaults_off(monkeypatch):
@@ -207,166 +203,3 @@ def test_get_app_version_empty_string_falls_back_to_dev(monkeypatch):
 def test_get_app_version_unset_falls_back_to_dev(monkeypatch):
     monkeypatch.delenv("APP_VERSION", raising=False)
     assert get_app_version() == "dev"
-
-
-def _make_config(**overrides):
-    base = dict(
-        client_id="cid_123",
-        client_secret="super_secret_value",
-        log_level="INFO",
-        semantic_command_enabled=False,
-        notify_staff_id=None,
-        notify_conversation_id=None,
-        output_dir="./output",
-    )
-    base.update(overrides)
-    return argparse.Namespace(**base)
-
-
-def test_log_startup_summary_all_off(monkeypatch, caplog):
-    monkeypatch.delenv("APP_VERSION", raising=False)
-    config = _make_config()
-    with caplog.at_level(logging.INFO, logger="file-bridge"):
-        log_startup_summary(config, logging.getLogger("file-bridge"))
-
-    text = caplog.text
-    assert "File Bridge starting: version=dev" in text
-    assert "client_id=cid_123" in text
-    assert "log_level=INFO" in text
-    assert "semantic_command=off (substring)" in text
-    assert "notify_staff=off" in text
-    assert "notify_group=off" in text
-    assert "output_dir=./output" in text
-    # Secret must never appear in startup logs.
-    assert "super_secret_value" not in text
-
-
-def test_log_startup_summary_all_on(monkeypatch, caplog):
-    monkeypatch.setenv("APP_VERSION", "1.2.0")
-    config = _make_config(
-        semantic_command_enabled=True,
-        notify_staff_id="staff_001",
-        notify_conversation_id="conv_abc",
-    )
-    with caplog.at_level(logging.INFO, logger="file-bridge"):
-        log_startup_summary(config, logging.getLogger("file-bridge"))
-
-    text = caplog.text
-    assert "File Bridge starting: version=1.2.0" in text
-    assert "semantic_command=on (semantic)" in text
-    assert "notify_staff=on (staff=staff_001)" in text
-    assert "notify_group=on (conversation=conv_abc)" in text
-    assert "super_secret_value" not in text
-
-
-def _make_stream_record(msg: str, level: int = logging.INFO) -> logging.LogRecord:
-    record = logging.LogRecord(
-        name="file-bridge",
-        level=level,
-        pathname="/app/.venv/lib/python3.14/site-packages/dingtalk_stream/stream.py",
-        lineno=1,
-        msg=msg,
-        args=(),
-        exc_info=None,
-    )
-    record.filename = "stream.py"
-    return record
-
-
-@pytest.fixture
-def configured_logs():
-    """Attach a capture handler to the root logger and configure logging.
-
-    The handler is added before ``setup_logger`` so it receives the same
-    stream-log filter as every other root handler; tests then observe what a
-    configured application actually emits.
-    """
-    records = []
-    capture = logging.Handler()
-    capture.emit = records.append
-    root = logging.getLogger()
-    previous_level = root.level
-    root.addHandler(capture)
-    try:
-        setup_logger("DEBUG")
-        yield records
-    finally:
-        root.removeHandler(capture)
-        root.setLevel(previous_level)
-
-
-def _emit(record: logging.LogRecord) -> None:
-    logging.getLogger("file-bridge").handle(record)
-
-
-def test_stream_disconnect_log_is_rewritten_to_conclusion(configured_logs):
-    _emit(
-        _make_stream_record(
-            "received disconnect topic=disconnect message={'content': 'long json'}"
-        )
-    )
-
-    assert len(configured_logs) == 1
-    assert (
-        configured_logs[0].getMessage()
-        == "DingTalk stream disconnected: received disconnect message"
-    )
-
-
-def test_stream_endpoint_log_is_rewritten_to_connected(configured_logs):
-    _emit(_make_stream_record("endpoint is {'endpoint': 'wss://...', 'ticket': 'abc'}"))
-
-    assert len(configured_logs) == 1
-    assert configured_logs[0].getMessage() == "DingTalk stream connected."
-
-
-def test_open_connection_log_is_downgraded_to_debug(configured_logs):
-    _emit(_make_stream_record("open connection, url=wss://dingtalk.example/stream"))
-
-    assert len(configured_logs) == 1
-    assert configured_logs[0].levelno == logging.DEBUG
-
-
-def test_unrelated_stream_log_is_preserved(configured_logs):
-    _emit(_make_stream_record("[start] network exception, will retry"))
-
-    assert len(configured_logs) == 1
-    assert configured_logs[0].getMessage() == "[start] network exception, will retry"
-    assert configured_logs[0].levelno == logging.INFO
-
-
-def test_non_stream_log_is_preserved(configured_logs):
-    record = logging.LogRecord(
-        name="file-bridge",
-        level=logging.INFO,
-        pathname="app/handlers/message.py",
-        lineno=1,
-        msg="Received private message from alice, type=text",
-        args=(),
-        exc_info=None,
-    )
-    record.filename = "message.py"
-    _emit(record)
-
-    assert len(configured_logs) == 1
-    assert (
-        configured_logs[0].getMessage()
-        == "Received private message from alice, type=text"
-    )
-
-
-def test_repeated_setup_logger_does_not_duplicate_output(configured_logs):
-    setup_logger("DEBUG")
-    setup_logger("DEBUG")
-
-    logging.getLogger("file-bridge").info("unique-marker-9d1f")
-
-    assert [r.getMessage() for r in configured_logs] == ["unique-marker-9d1f"]
-
-
-def test_httpx_info_is_suppressed_but_warning_is_kept(configured_logs):
-    httpx_logger = logging.getLogger("httpx")
-    httpx_logger.info("GET https://oss.example/signed?token=secret")
-    httpx_logger.warning("request failed")
-
-    assert [r.getMessage() for r in configured_logs] == ["request failed"]

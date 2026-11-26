@@ -6,7 +6,6 @@ mutates ``os.environ``.
 """
 
 import asyncio
-import logging
 
 import pytest
 from dingtalk_stream import CallbackMessage
@@ -28,16 +27,23 @@ class _DelayedReviewer:
         self._delay = delay
         self._block = block
         self.calls = []
+        self.cancellations = 0
+        self.cancelled = asyncio.Event()
 
     async def review(self, image_path):
         self.calls.append(image_path)
         # Consume the result before awaiting so concurrent tasks keep the
         # order in which the handler started them.
         text = self._results.pop(0) if self._results else None
-        if self._block is not None:
-            await self._block.wait()
-        if self._delay:
-            await asyncio.sleep(self._delay)
+        try:
+            if self._block is not None:
+                await self._block.wait()
+            if self._delay:
+                await asyncio.sleep(self._delay)
+        except asyncio.CancelledError:
+            self.cancellations += 1
+            self.cancelled.set()
+            raise
         return text
 
 
@@ -116,16 +122,6 @@ async def _wait_for_replies(replies, count, timeout=2.0):
         await asyncio.sleep(0.005)
 
 
-async def _wait_for_log(caplog, text, timeout=2.0):
-    """Wait until *text* appears in captured logs, observing only log output."""
-    loop = asyncio.get_running_loop()
-    deadline = loop.time() + timeout
-    while text not in caplog.text:
-        if loop.time() >= deadline:
-            raise AssertionError(f"log {text!r} not seen: {caplog.text!r}")
-        await asyncio.sleep(0.005)
-
-
 # --- single photo ----------------------------------------------------------
 
 
@@ -167,29 +163,26 @@ async def test_review_after_window_is_sent_as_prefixed_second_message(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_review_total_timeout_sends_only_one_reply(tmp_path, caplog):
+async def test_review_total_timeout_sends_only_one_reply(tmp_path):
     block = asyncio.Event()
     reviewer = _DelayedReviewer(results=["太晚了"], block=block)
-    logger = logging.getLogger("file-bridge.test.review")
     handler, pipeline, replies = _build_handler(
         tmp_path,
         reviewer,
         merge_window=0.01,
         review_timeout=0.05,
-        logger=logger,
     )
 
-    with caplog.at_level(logging.WARNING, logger="file-bridge.test.review"):
-        await pipeline.process(_callback("picture", {"downloadCode": "code-1"}))
-        await _wait_for_log(caplog, "cancelled after")
+    await pipeline.process(_callback("picture", {"downloadCode": "code-1"}))
+    await asyncio.wait_for(reviewer.cancelled.wait(), timeout=2.0)
 
+    assert reviewer.cancellations == 1
     assert len(replies) == 1
     assert "太晚了" not in replies[0]
-    assert "cancelled after" in caplog.text
 
 
 @pytest.mark.asyncio
-async def test_review_deadline_is_fixed_at_first_request(tmp_path, caplog):
+async def test_review_deadline_is_fixed_at_first_request(tmp_path):
     """A slow later download must not extend the batch's shared deadline.
 
     The first photo's review blocks while the second download outlives the
@@ -201,11 +194,18 @@ async def test_review_deadline_is_fixed_at_first_request(tmp_path, caplog):
     class Reviewer:
         def __init__(self):
             self.calls = 0
+            self.cancellations = 0
+            self.cancelled = asyncio.Event()
 
         async def review(self, _path):
             self.calls += 1
             if self.calls == 1:
-                await block.wait()
+                try:
+                    await block.wait()
+                except asyncio.CancelledError:
+                    self.cancellations += 1
+                    self.cancelled.set()
+                    raise
                 return "first"
             return None
 
@@ -223,22 +223,21 @@ async def test_review_deadline_is_fixed_at_first_request(tmp_path, caplog):
             file_size=19,
         )
 
-    logger = logging.getLogger("file-bridge.test.review")
+    reviewer = Reviewer()
     handler, pipeline, replies = _build_handler(
         tmp_path,
-        Reviewer(),
+        reviewer,
         merge_window=0.01,
         review_timeout=0.05,
-        logger=logger,
         download=download,
     )
 
-    with caplog.at_level(logging.WARNING, logger="file-bridge.test.review"):
-        await pipeline.process(
-            _callback("richText", _rich_text(["c1", "c2"]), conversation_type="2")
-        )
-        await _wait_for_log(caplog, "cancelled after")
+    await pipeline.process(
+        _callback("richText", _rich_text(["c1", "c2"]), conversation_type="2")
+    )
+    await asyncio.wait_for(reviewer.cancelled.wait(), timeout=2.0)
 
+    assert reviewer.cancellations == 1
     assert len(replies) == 1
     assert "first" not in replies[0]
 

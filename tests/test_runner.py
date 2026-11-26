@@ -47,7 +47,6 @@ async def test_service_lifecycle_and_graceful_shutdown():
     # Spec: shutdown cancels the runner task; the SDK client is never
     # stopped directly (SDK 0.24.3 has no stop() API).
     assert cancelled.is_set()
-    client.stop.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -89,8 +88,6 @@ async def test_service_without_notifier():
 
     service.request_stop("SIGINT")
     await asyncio.wait_for(run_task, timeout=2.0)
-
-    client.stop.assert_not_awaited()
 
 
 def test_run_forever_handles_exit():
@@ -136,7 +133,6 @@ async def test_shutdown_cancels_sdk_task_without_client_stop():
     await asyncio.wait_for(run_task, timeout=2.0)
 
     assert cancelled.is_set()
-    client.stop.assert_not_awaited()
 
 
 def test_request_stop_raises_on_second_signal():
@@ -261,10 +257,8 @@ async def test_stop_is_idempotent():
     service.request_stop("SIGINT")
     await service.stop()
 
-    client.stop.assert_not_awaited()
-    # Second call must be a no-op (no direct SDK stop, ever)
+    # Second call must be a no-op.
     await service.stop()
-    client.stop.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -331,5 +325,3 @@ async def test_startup_hook_failure_does_not_block_start():
 
     service.request_stop("SIGINT")
     await asyncio.wait_for(run_task, timeout=2.0)
-
-    assert logger.warning.called

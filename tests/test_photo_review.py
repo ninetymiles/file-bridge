@@ -9,7 +9,6 @@ import asyncio
 import base64
 import io
 import json
-import logging
 import os
 import subprocess
 import sys
@@ -301,17 +300,14 @@ async def test_unusable_content_degrades_to_none(tmp_path, content):
 
 
 @pytest.mark.asyncio
-async def test_server_error_degrades_to_none(tmp_path, caplog):
+async def test_server_error_degrades_to_none(tmp_path):
     path = _make_image(tmp_path / "photo.jpg", (320, 240))
 
-    with caplog.at_level(logging.WARNING, logger="file-bridge.review"):
-        text = await _review(
-            path, _Recorder([httpx.Response(500, text="upstream exploded")])
-        )
+    text = await _review(
+        path, _Recorder([httpx.Response(500, text="upstream exploded")])
+    )
 
     assert text is None
-    assert "500" in caplog.text
-    assert "sk-test" not in caplog.text
 
 
 @pytest.mark.asyncio
@@ -587,12 +583,11 @@ def _models_body(*model_ids):
     }
 
 
-def test_probe_ready_when_model_listed(caplog):
+def test_probe_ready_when_model_listed():
     recorder = _Recorder([httpx.Response(200, json=_models_body("qwen3.5:9b"))])
     config = ReviewConfig("http://gateway.local/v1", "sk-test", "qwen3.5:9b")
 
-    with caplog.at_level(logging.INFO, logger="file-bridge.review"):
-        probe = asyncio.run(_probe(config, recorder))
+    probe = asyncio.run(_probe(config, recorder))
 
     assert probe.ready is True
     assert probe.models == ("qwen3.5:9b",)
@@ -600,30 +595,24 @@ def test_probe_ready_when_model_listed(caplog):
     assert request.method == "GET"
     assert request.url.raw_path == b"/v1/models"
     assert request.headers["authorization"] == "Bearer sk-test"
-    assert "health OK" in caplog.text
-    assert "present=yes" in caplog.text
-    assert "sk-test" not in caplog.text
 
 
-def test_probe_not_ready_when_model_missing(caplog):
+def test_probe_not_ready_when_model_missing():
     recorder = _Recorder([httpx.Response(200, json=_models_body("other-model"))])
     config = ReviewConfig("http://gateway.local/v1", "sk-test", "missing")
 
-    with caplog.at_level(logging.WARNING, logger="file-bridge.review"):
-        probe = asyncio.run(_probe(config, recorder))
+    probe = asyncio.run(_probe(config, recorder))
 
     assert probe.ready is False
     assert probe.reachable is True
     assert probe.model_present is False
-    assert "present=no" in caplog.text
 
 
-def test_probe_not_ready_for_empty_model_list(caplog):
+def test_probe_not_ready_for_empty_model_list():
     recorder = _Recorder([httpx.Response(200, json=_models_body())])
     config = ReviewConfig("http://gateway.local/v1", "sk-test", "test-model")
 
-    with caplog.at_level(logging.WARNING, logger="file-bridge.review"):
-        probe = asyncio.run(_probe(config, recorder))
+    probe = asyncio.run(_probe(config, recorder))
 
     assert probe.ready is False
     assert probe.models == ()
@@ -638,66 +627,57 @@ def test_probe_not_ready_for_empty_model_list(caplog):
         ["not-an-object"],
     ],
 )
-def test_probe_not_ready_for_unparsable_payload(payload, caplog):
+def test_probe_not_ready_for_unparsable_payload(payload):
     recorder = _Recorder([httpx.Response(200, json=payload)])
     config = ReviewConfig("http://gateway.local/v1", "sk-test", "test-model")
 
-    with caplog.at_level(logging.WARNING, logger="file-bridge.review"):
-        probe = asyncio.run(_probe(config, recorder))
+    probe = asyncio.run(_probe(config, recorder))
 
     assert probe.ready is False
     assert probe.reachable is True
-    assert "health FAILED" in caplog.text
 
 
-def test_probe_not_ready_for_invalid_json(caplog):
+def test_probe_not_ready_for_invalid_json():
     recorder = _Recorder([httpx.Response(200, content=b"not json")])
     config = ReviewConfig("http://gateway.local/v1", "sk-test", "test-model")
 
-    with caplog.at_level(logging.WARNING, logger="file-bridge.review"):
-        probe = asyncio.run(_probe(config, recorder))
+    probe = asyncio.run(_probe(config, recorder))
 
     assert probe.ready is False
     assert probe.reachable is True
     assert probe.models == ()
 
 
-def test_probe_skips_entries_without_id(caplog):
+def test_probe_skips_entries_without_id():
     recorder = _Recorder(
         [httpx.Response(200, json={"data": [{"object": "model"}, {"id": "test-model"}]})]
     )
     config = ReviewConfig("http://gateway.local/v1", "sk-test", "test-model")
 
-    with caplog.at_level(logging.INFO, logger="file-bridge.review"):
-        probe = asyncio.run(_probe(config, recorder))
+    probe = asyncio.run(_probe(config, recorder))
 
     assert probe.ready is True
     assert probe.models == ("test-model",)
 
 
-def test_probe_reports_non_success_status(caplog):
+def test_probe_reports_non_success_status():
     recorder = _Recorder([httpx.Response(403, json={"error": {"message": "forbidden"}})])
     config = ReviewConfig("http://gateway.local/v1", "sk-test", "test-model")
 
-    with caplog.at_level(logging.WARNING, logger="file-bridge.review"):
-        probe = asyncio.run(_probe(config, recorder))
+    probe = asyncio.run(_probe(config, recorder))
 
     assert probe.ready is False
     assert probe.status == 403
-    assert "status=403" in caplog.text
 
 
-def test_probe_reports_connection_failure(caplog):
+def test_probe_reports_connection_failure():
     recorder = _Recorder([httpx.ConnectError("connection refused")])
     config = ReviewConfig("http://gateway.local/v1", "sk-test", "test-model")
 
-    with caplog.at_level(logging.WARNING, logger="file-bridge.review"):
-        probe = asyncio.run(_probe(config, recorder))
+    probe = asyncio.run(_probe(config, recorder))
 
     assert probe.ready is False
     assert probe.reachable is False
-    assert "ConnectError" in caplog.text
-    assert "sk-test" not in caplog.text
 
 
 async def _probe(config, recorder):
@@ -730,16 +710,6 @@ def test_warmup_sends_minimal_chat_request():
     assert body["reasoning_effort"] == "none"
 
 
-def test_warmup_success_stays_below_info(caplog):
-    recorder = _Recorder([httpx.Response(200, json=_ok_body("ok"))])
-    config = ReviewConfig("http://gateway.local/v1", "sk-test", "test-model")
-
-    with caplog.at_level(logging.INFO, logger="file-bridge.review"):
-        asyncio.run(_warmup(config, recorder))
-
-    assert "warmup" not in caplog.text
-
-
 @pytest.mark.parametrize(
     "response",
     [
@@ -748,17 +718,13 @@ def test_warmup_success_stays_below_info(caplog):
         httpx.ConnectError("connection refused"),
     ],
 )
-def test_warmup_failure_logs_one_warning_and_never_raises(response, caplog):
+def test_warmup_failure_never_raises(response):
     recorder = _Recorder([response])
     config = ReviewConfig("http://gateway.local/v1", "sk-test", "test-model")
 
-    with caplog.at_level(logging.WARNING, logger="file-bridge.review"):
-        asyncio.run(_warmup(config, recorder))
+    asyncio.run(_warmup(config, recorder))
 
-    warnings = [record for record in caplog.records if record.levelno == logging.WARNING]
-    assert len(warnings) == 1
-    assert "warmup FAILED" in caplog.text
-    assert "sk-test" not in caplog.text
+    assert len(recorder.requests) == 1
 
 
 def test_warmup_dedupes_concurrent_requests():

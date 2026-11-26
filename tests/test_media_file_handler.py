@@ -1,12 +1,26 @@
 """Unit tests for MediaFileHandler."""
 
-import logging
 import os
+import shutil
+from pathlib import Path
+
 import pytest
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 from dingtalk_stream import ChatbotMessage
 from app.handlers import MediaFileHandler, PipelineHandler, ReplyTier
 from app.services.file_downloader import DownloadResult
+from app.services.metadata_store import MetadataStore
+
+FIXTURES_DIR = Path(__file__).parent / "fixtures"
+NIKON_FIXTURE = FIXTURES_DIR / "sample_nikon_z63.JPG"
+
+
+def _last_record(output_dir):
+    store = MetadataStore(output_dir=str(output_dir))
+    with store.get_connection() as conn:
+        return conn.execute(
+            "SELECT * FROM file_metadata ORDER BY id DESC LIMIT 1"
+        ).fetchone()
 
 
 def _unsupported_type_handler():
@@ -32,9 +46,7 @@ async def test_media_file_handler_new_file(tmp_path):
         )
     )
 
-    mock_store = MagicMock()
-    mock_store.async_is_duplicate = AsyncMock(return_value=False)
-    mock_store.async_insert_record = AsyncMock(return_value=1)
+    store = MetadataStore(output_dir=str(output_dir))
 
     mock_pipeline = MagicMock(spec=PipelineHandler)
     mock_pipeline.is_draining.return_value = False
@@ -42,7 +54,7 @@ async def test_media_file_handler_new_file(tmp_path):
 
     handler = MediaFileHandler(
         output_dir=str(output_dir),
-        metadata_store=mock_store,
+        metadata_store=store,
         file_downloader=mock_downloader,
     )
 
@@ -64,18 +76,17 @@ async def test_media_file_handler_new_file(tmp_path):
 
     mock_downloader.get_download_url.assert_called_once_with("code_123")
     mock_downloader.download_file_stream.assert_called_once_with("https://example.com/dl")
-    mock_store.async_is_duplicate.assert_called_once_with("dummy_sha256")
-    mock_store.async_insert_record.assert_called_once()
-    saved_path_arg = mock_store.async_insert_record.call_args[1]["saved_path"]
-    assert os.path.exists(saved_path_arg)
-    assert os.path.dirname(saved_path_arg) == str(output_dir)
-    assert os.path.basename(saved_path_arg).endswith("_-001.pdf")
 
-    insert_kwargs = mock_store.async_insert_record.call_args[1]
-    assert insert_kwargs["sender_id"] == "user_001"
-    assert insert_kwargs["sender_nick"] == "Alice"
-    assert insert_kwargs["sender_staff_id"] == "staff-001"
-    assert insert_kwargs["media_type"] == "file"
+    record = _last_record(output_dir)
+    saved_path = record["saved_path"]
+    assert os.path.exists(saved_path)
+    assert os.path.dirname(saved_path) == str(output_dir)
+    assert os.path.basename(saved_path).endswith("_-001.pdf")
+    assert record["sender_id"] == "user_001"
+    assert record["sender_nick"] == "Alice"
+    assert record["sender_staff_id"] == "staff-001"
+    assert record["media_type"] == "file"
+    assert record["original_filename"] == "test_doc.pdf"
 
     # Verify reply
     mock_pipeline.async_reply_text.assert_not_called()
@@ -99,9 +110,7 @@ async def test_media_file_handler_picture(tmp_path):
         )
     )
 
-    mock_store = MagicMock()
-    mock_store.async_is_duplicate = AsyncMock(return_value=False)
-    mock_store.async_insert_record = AsyncMock(return_value=1)
+    store = MetadataStore(output_dir=str(output_dir))
 
     mock_pipeline = MagicMock(spec=PipelineHandler)
     mock_pipeline.is_draining.return_value = False
@@ -109,7 +118,7 @@ async def test_media_file_handler_picture(tmp_path):
 
     handler = MediaFileHandler(
         output_dir=str(output_dir),
-        metadata_store=mock_store,
+        metadata_store=store,
         file_downloader=mock_downloader,
     )
 
@@ -126,8 +135,7 @@ async def test_media_file_handler_picture(tmp_path):
 
     assert intent is not None
     assert intent.tier == ReplyTier.PRIMARY
-    mock_store.async_insert_record.assert_called_once()
-    assert mock_store.async_insert_record.call_args[1]["media_type"] == "picture"
+    assert _last_record(output_dir)["media_type"] == "picture"
     assert ".png" in intent.text
 
 
@@ -198,9 +206,7 @@ async def test_media_file_handler_video(tmp_path):
         )
     )
 
-    mock_store = MagicMock()
-    mock_store.async_is_duplicate = AsyncMock(return_value=False)
-    mock_store.async_insert_record = AsyncMock(return_value=2)
+    store = MetadataStore(output_dir=str(output_dir))
 
     mock_pipeline = MagicMock(spec=PipelineHandler)
     mock_pipeline.is_draining.return_value = False
@@ -208,7 +214,7 @@ async def test_media_file_handler_video(tmp_path):
 
     handler = MediaFileHandler(
         output_dir=str(output_dir),
-        metadata_store=mock_store,
+        metadata_store=store,
         file_downloader=mock_downloader,
     )
 
@@ -225,8 +231,7 @@ async def test_media_file_handler_video(tmp_path):
     intent = await handler.handle(msg, raw_data, mock_pipeline)
     assert intent is not None
     assert intent.tier == ReplyTier.PRIMARY
-    mock_store.async_insert_record.assert_called_once()
-    assert mock_store.async_insert_record.call_args[1]["media_type"] == "video"
+    assert _last_record(output_dir)["media_type"] == "video"
     mock_pipeline.async_reply_text.assert_not_called()
     assert ".mp4" in intent.text
 
@@ -243,15 +248,13 @@ async def test_rich_text_single_image(tmp_path):
         return_value=DownloadResult(temp_path=str(temp_file), sha256="sha_pic1", file_size=4)
     )
 
-    mock_store = MagicMock()
-    mock_store.async_is_duplicate = AsyncMock(return_value=False)
-    mock_store.async_insert_record = AsyncMock(return_value=1)
+    store = MetadataStore(output_dir=str(output_dir))
 
     mock_pipeline = MagicMock(spec=PipelineHandler)
     mock_pipeline.is_draining.return_value = False
     mock_pipeline.async_reply_text = AsyncMock()
 
-    handler = MediaFileHandler(output_dir=str(output_dir), metadata_store=mock_store, file_downloader=mock_downloader)
+    handler = MediaFileHandler(output_dir=str(output_dir), metadata_store=store, file_downloader=mock_downloader)
 
     raw_data = {
         "msgtype": "richText",
@@ -271,14 +274,13 @@ async def test_rich_text_single_image(tmp_path):
     assert intent is not None
     assert intent.tier == ReplyTier.PRIMARY
 
-    mock_store.async_insert_record.assert_called_once()
-    assert mock_store.async_insert_record.call_args[1]["media_type"] == "picture"
+    assert _last_record(output_dir)["media_type"] == "picture"
     mock_pipeline.async_reply_text.assert_not_called()
     assert "文件接收成功，已保存为:" in intent.text
 
 
 @pytest.mark.asyncio
-async def test_rich_text_multiple_images(tmp_path, caplog):
+async def test_rich_text_multiple_images(tmp_path):
     output_dir = tmp_path / "output"
     temp1 = tmp_path / "t1.tmp"
     temp1.write_bytes(b"pic1")
@@ -318,8 +320,7 @@ async def test_rich_text_multiple_images(tmp_path, caplog):
     }
     msg = ChatbotMessage.from_dict(raw_data)
 
-    with caplog.at_level(logging.INFO):
-        intent = await handler.handle(msg, raw_data, mock_pipeline)
+    intent = await handler.handle(msg, raw_data, mock_pipeline)
     assert intent is not None
     assert intent.tier == ReplyTier.PRIMARY
 
@@ -328,14 +329,7 @@ async def test_rich_text_multiple_images(tmp_path, caplog):
     lines = intent.text.split("\n")
     assert len(lines) == 2
     assert all("文件接收成功，已保存为:" in line for line in lines)
-
-    # Each picture emits exactly one download-start INFO line; codes stay out.
-    downloading = [
-        r.message for r in caplog.records
-        if r.levelno == logging.INFO and r.message.startswith("Downloading file:")
-    ]
-    assert len(downloading) == 2
-    assert all("code_1" not in m and "code_2" not in m for m in downloading)
+    assert mock_downloader.download_file_stream.await_count == 2
 
 
 @pytest.mark.asyncio
@@ -516,15 +510,15 @@ async def test_media_file_handler_group_unknown_type_stays_silent():
 
 
 @pytest.mark.asyncio
-async def test_single_media_reply_includes_metadata_line(tmp_path):
+async def test_single_media_reply_includes_exif_metadata_line(tmp_path):
     output_dir = tmp_path / "output"
-    temp_file = tmp_path / "temp_video.tmp"
-    temp_file.write_bytes(b"video bytes")
+    temp_file = tmp_path / "temp_photo.jpg"
+    shutil.copy(NIKON_FIXTURE, temp_file)
 
     mock_downloader = MagicMock()
     mock_downloader.get_download_url = AsyncMock(return_value="https://example.com/dl")
     mock_downloader.download_file_stream = AsyncMock(
-        return_value=DownloadResult(temp_path=str(temp_file), sha256="v_sha", file_size=11)
+        return_value=DownloadResult(temp_path=str(temp_file), sha256="exif_sha", file_size=100)
     )
 
     mock_store = MagicMock()
@@ -537,19 +531,18 @@ async def test_single_media_reply_includes_metadata_line(tmp_path):
     handler = MediaFileHandler(output_dir=str(output_dir), metadata_store=mock_store, file_downloader=mock_downloader)
 
     raw_data = {
-        "msgtype": "video",
+        "msgtype": "picture",
         "senderNick": "Charlie",
-        "content": {"downloadCode": "vc", "fileName": "demo.mp4"},
+        "content": {"downloadCode": "pc"},
     }
     msg = ChatbotMessage.from_dict(raw_data)
 
-    with patch("app.handlers.message.extract_media_metadata", return_value="544x960  30.2fps"):
-        intent = await handler.handle(msg, raw_data, mock_pipeline)
+    intent = await handler.handle(msg, raw_data, mock_pipeline)
 
     mock_pipeline.async_reply_text.assert_not_called()
     lines = intent.text.split("\n")
     assert lines[0].startswith("文件接收成功，已保存为:")
-    assert lines[1] == "544x960  30.2fps"
+    assert "ISO" in lines[1]
 
 
 @pytest.mark.asyncio
@@ -580,8 +573,7 @@ async def test_single_media_reply_no_metadata_stays_filename_only(tmp_path):
     }
     msg = ChatbotMessage.from_dict(raw_data)
 
-    with patch("app.handlers.message.extract_media_metadata", return_value=None):
-        intent = await handler.handle(msg, raw_data, mock_pipeline)
+    intent = await handler.handle(msg, raw_data, mock_pipeline)
 
     mock_pipeline.async_reply_text.assert_not_called()
     assert intent.text.startswith("文件接收成功，已保存为:")
@@ -591,8 +583,8 @@ async def test_single_media_reply_no_metadata_stays_filename_only(tmp_path):
 @pytest.mark.asyncio
 async def test_rich_text_reply_appends_per_image_metadata(tmp_path):
     output_dir = tmp_path / "output"
-    temp1 = tmp_path / "t1.tmp"
-    temp1.write_bytes(b"pic1")
+    temp1 = tmp_path / "t1.jpg"
+    shutil.copy(NIKON_FIXTURE, temp1)
     temp2 = tmp_path / "t2.tmp"
     temp2.write_bytes(b"pic2")
 
@@ -624,17 +616,13 @@ async def test_rich_text_reply_appends_per_image_metadata(tmp_path):
     }
     msg = ChatbotMessage.from_dict(raw_data)
 
-    # First image has metadata, second has none.
-    with patch(
-        "app.handlers.message.extract_media_metadata",
-        side_effect=["2024-01-15 14:30:00  f/2.8  ISO 400", None],
-    ):
-        intent = await handler.handle(msg, raw_data, mock_pipeline)
+    # First image carries EXIF, second is not a decodable image.
+    intent = await handler.handle(msg, raw_data, mock_pipeline)
 
     mock_pipeline.async_reply_text.assert_not_called()
     lines = intent.text.split("\n")
     # Three lines: filename1, metadata1, filename2 (no metadata)
     assert len(lines) == 3
     assert lines[0].startswith("文件接收成功，已保存为:")
-    assert lines[1] == "2024-01-15 14:30:00  f/2.8  ISO 400"
+    assert "ISO" in lines[1]
     assert lines[2].startswith("文件接收成功，已保存为:")

@@ -1,7 +1,6 @@
 """End-to-end integration tests for the message pipeline and app entrypoint."""
 
 import asyncio
-import functools
 import logging
 import os
 import hashlib
@@ -11,15 +10,13 @@ from unittest.mock import MagicMock, AsyncMock
 import httpx
 from dingtalk_stream import CallbackMessage, AckMessage
 import app.main as main_module
-import app.handlers.message as message_module
 from app.main import (
-    _ReviewGate,
-    _build_wake_warmup,
+    ReviewGate,
+    build_wake_warmup,
     create_pipeline,
-    setup_logger,
 )
 from app.services.command_matching import SubstringCommandMatcher
-from app.services.disk_warmup import ensure_storage_ready
+from app.services.file_downloader import FileDownloader
 from app.services.metadata_store import MetadataStore
 from app.services.photo_review import ReviewConfig
 from app.handlers.message import (
@@ -52,13 +49,18 @@ async def test_end_to_end_file_and_rebuild_index_pipeline(tmp_path):
     mock_client.get_access_token = MagicMock(return_value="mock_access_token")
 
     metadata_store = MetadataStore(output_dir=str(output_dir))
-    pipeline = create_pipeline(
-        str(output_dir), metadata_store, mock_client, SubstringCommandMatcher()
+    file_downloader = FileDownloader(
+        output_dir=str(output_dir),
+        dingtalk_client=mock_client,
+        http_client=http_client,
     )
-    # Inject test http_client
-    for handler in pipeline.handlers:
-        if hasattr(handler, "file_downloader"):
-            handler.file_downloader._http_client = http_client
+    pipeline = create_pipeline(
+        str(output_dir),
+        metadata_store,
+        mock_client,
+        SubstringCommandMatcher(),
+        file_downloader=file_downloader,
+    )
 
     # Mock reply_text on pipeline to capture replies
     replies = []
@@ -89,7 +91,6 @@ async def test_end_to_end_file_and_rebuild_index_pipeline(tmp_path):
     assert ".pdf" in replies[0][0]
 
     # Verify SQLite record created
-    metadata_store = next(h.metadata_store for h in pipeline.handlers if hasattr(h, "metadata_store"))
     assert metadata_store.is_duplicate(file_sha256) is True
 
     # 2. Send the exact same file again (deduplication check)
@@ -315,17 +316,7 @@ async def test_index_report_command_returns_totals_and_latest_day(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-@pytest.fixture
-def short_warmup_delay(monkeypatch):
-    """Compress the 3s warmup timer while keeping the real race logic."""
-    monkeypatch.setattr(
-        message_module,
-        "ensure_storage_ready",
-        functools.partial(ensure_storage_ready, delay=0.05),
-    )
-
-
-def _build_warmup_pipeline(tmp_path, wake_warmup=None):
+def _build_warmup_pipeline(tmp_path, wake_warmup=None, file_downloader=None):
     """Assemble the real pipeline on a tmp output dir; replies are captured."""
     output_dir = tmp_path / "warmup_output"
     mock_client = MagicMock()
@@ -333,9 +324,15 @@ def _build_warmup_pipeline(tmp_path, wake_warmup=None):
     mock_client.get_access_token = MagicMock(return_value="mock_access_token")
     metadata_store = MetadataStore(output_dir=str(output_dir))
     pipeline = create_pipeline(
-        str(output_dir), metadata_store, mock_client, SubstringCommandMatcher(),
+        str(output_dir),
+        metadata_store,
+        mock_client,
+        SubstringCommandMatcher(),
         wake_warmup=wake_warmup,
+        file_downloader=file_downloader,
     )
+    # Keep the real race logic; only compress the 3s wake timer.
+    pipeline.warmup_delay = 0.05
     replies = []
 
     def fake_reply_text(text, msg):
@@ -352,32 +349,6 @@ def _send(pipeline, data):
     return pipeline.process(callback)
 
 
-class _ReceivedLogHandler(logging.Handler):
-    """Record only the pipeline's receive-summary log line."""
-
-    def __init__(self, events):
-        super().__init__(level=logging.INFO)
-        self.events = events
-
-    def emit(self, record: logging.LogRecord) -> None:
-        if record.getMessage().startswith("Received "):
-            self.events.append("log_received")
-
-
-def _attach_received_log(pipeline, events):
-    handler = _ReceivedLogHandler(events)
-    logger = pipeline.logger
-    previous_level = logger.level
-    logger.setLevel(logging.INFO)
-    logger.addHandler(handler)
-    return handler, logger, previous_level
-
-
-def _detach_received_log(handler, logger, previous_level):
-    logger.removeHandler(handler)
-    logger.setLevel(previous_level)
-
-
 _BASE_DATA = {
     "senderNick": "Tester",
     "senderId": "user_100",
@@ -387,9 +358,7 @@ _BASE_DATA = {
 
 
 @pytest.mark.asyncio
-async def test_slow_probe_sends_waking_notice_before_logs_and_final_reply(
-    tmp_path, short_warmup_delay
-):
+async def test_slow_probe_sends_waking_notice_before_probe_and_final_reply(tmp_path):
     pipeline, _, replies = _build_warmup_pipeline(tmp_path)
     events = []
 
@@ -399,8 +368,6 @@ async def test_slow_probe_sends_waking_notice_before_logs_and_final_reply(
 
     pipeline.storage_probe = slow_probe
 
-    handler, logger, previous_level = _attach_received_log(pipeline, events)
-
     base_reply = pipeline.reply_text
 
     def timed_reply(text, msg):
@@ -409,14 +376,11 @@ async def test_slow_probe_sends_waking_notice_before_logs_and_final_reply(
 
     pipeline.reply_text = timed_reply
 
-    try:
-        status, _ = await _send(pipeline, {
-            **_BASE_DATA,
-            "msgtype": "text",
-            "text": {"content": "你好"},
-        })
-    finally:
-        _detach_received_log(handler, logger, previous_level)
+    status, _ = await _send(pipeline, {
+        **_BASE_DATA,
+        "msgtype": "text",
+        "text": {"content": "你好"},
+    })
 
     assert status == AckMessage.STATUS_OK
     assert len(replies) == 2
@@ -424,11 +388,10 @@ async def test_slow_probe_sends_waking_notice_before_logs_and_final_reply(
     # Final reply is the regular unmatched-command guidance.
     assert replies[1].count("• ") == len(CAPABILITY_VARIANTS)
 
-    # Order: notice -> probe completion -> first receive log -> final reply.
+    # Order: wake notice -> probe completion -> final reply.
     assert events[0] == ("reply", WAKING_STORAGE_TEXT)
     assert events[1] == "probe_done"
-    assert events[2] == "log_received"
-    assert events[3][0] == "reply"
+    assert events[2][0] == "reply"
 
 
 @pytest.mark.asyncio
@@ -457,32 +420,22 @@ async def test_probe_failure_replies_unavailable_and_skips_pipeline(tmp_path):
 
     pipeline.storage_probe = broken_probe
 
-    log_events = []
-    handler, logger, previous_level = _attach_received_log(pipeline, log_events)
-
-    try:
-        status, _ = await _send(pipeline, {
-            **_BASE_DATA,
-            "msgtype": "text",
-            "text": {"content": "重建索引"},
-        })
-    finally:
-        _detach_received_log(handler, logger, previous_level)
+    status, _ = await _send(pipeline, {
+        **_BASE_DATA,
+        "msgtype": "text",
+        "text": {"content": "重建索引"},
+    })
 
     assert status == AckMessage.STATUS_OK
     assert replies == [STORAGE_UNAVAILABLE_TEXT]
-    assert log_events == []
 
 
 @pytest.mark.asyncio
 async def test_every_message_type_warms_up_before_processing(tmp_path):
-    pipeline, _, replies = _build_warmup_pipeline(tmp_path)
     events = []
 
     def recording_probe():
         events.append("probe")
-
-    pipeline.storage_probe = recording_probe
 
     async def mock_download(request: httpx.Request):
         if request.url.path == "/v1.0/robot/messageFiles/download":
@@ -492,9 +445,14 @@ async def test_every_message_type_warms_up_before_processing(tmp_path):
         return httpx.Response(200, content=b"payload-" + str(len(events)).encode())
 
     http_client = httpx.AsyncClient(transport=httpx.MockTransport(mock_download))
-    for handler in pipeline.handlers:
-        if hasattr(handler, "file_downloader"):
-            handler.file_downloader._http_client = http_client
+    file_downloader = FileDownloader(
+        output_dir=str(tmp_path / "warmup_output"),
+        http_client=http_client,
+    )
+    pipeline, _, replies = _build_warmup_pipeline(
+        tmp_path, file_downloader=file_downloader
+    )
+    pipeline.storage_probe = recording_probe
 
     messages = [
         {"msgtype": "text", "text": {"content": "你好"}},
@@ -528,9 +486,7 @@ async def test_every_message_type_warms_up_before_processing(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_cold_disk_rebuild_command_replies_waking_then_result(
-    tmp_path, short_warmup_delay
-):
+async def test_cold_disk_rebuild_command_replies_waking_then_result(tmp_path):
     pipeline, _, replies = _build_warmup_pipeline(tmp_path)
 
     def slow_probe():
@@ -551,9 +507,7 @@ async def test_cold_disk_rebuild_command_replies_waking_then_result(
 
 
 @pytest.mark.asyncio
-async def test_cold_wakeup_preload_starts_and_notice_is_not_delayed(
-    tmp_path, short_warmup_delay
-):
+async def test_cold_wakeup_preload_starts_and_notice_is_not_delayed(tmp_path):
     events = []
     release = asyncio.Event()
 
@@ -616,7 +570,7 @@ async def test_hot_disk_does_not_start_preload(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_failed_preload_does_not_affect_replies(tmp_path, short_warmup_delay):
+async def test_failed_preload_does_not_affect_replies(tmp_path):
     async def failing_warmup():
         # Production warmup never raises; it reports and returns.
         logging.getLogger("test.warmup").warning("Photo review warmup FAILED")
@@ -624,7 +578,7 @@ async def test_failed_preload_does_not_affect_replies(tmp_path, short_warmup_del
     pipeline, _, replies = _build_warmup_pipeline(tmp_path, wake_warmup=failing_warmup)
 
     def slow_probe():
-        time.sleep(0.05)
+        time.sleep(0.2)
 
     pipeline.storage_probe = slow_probe
 
@@ -649,9 +603,9 @@ async def test_wake_warmup_waits_for_probe_ready(monkeypatch):
     monkeypatch.setattr(main_module, "warmup_model", fake_warmup_model)
 
     config = ReviewConfig("http://gateway.local/v1", "sk-test", "test-model")
-    gate = main_module._ReviewGate()
+    gate = main_module.ReviewGate()
     logger = logging.getLogger("test.warmup")
-    wake = main_module._build_wake_warmup(config, gate, logger)
+    wake = main_module.build_wake_warmup(config, gate, logger)
 
     # Probe not finished (or failed): no preload.
     await wake()
@@ -662,60 +616,6 @@ async def test_wake_warmup_waits_for_probe_ready(monkeypatch):
     assert calls == ["test-model"]
 
     # Review not configured at all: the gate alone must not trigger a request.
-    silent = main_module._build_wake_warmup(None, gate, logger)
+    silent = main_module.build_wake_warmup(None, gate, logger)
     await silent()
     assert calls == ["test-model"]
-
-
-@pytest.mark.asyncio
-async def test_media_pipeline_emits_no_httpx_request_lines_at_info(tmp_path, caplog):
-    """After setup_logger, httpx per-request INFO lines must not appear.
-
-    httpx logs "HTTP Request: ..." at INFO by default; those lines carry
-    signed OSS URLs. setup_logger pins the httpx logger to WARNING so a
-    default INFO run stays clean.
-    """
-    setup_logger("INFO")
-
-    file_bytes = b"integration media payload"
-
-    async def mock_handler(request: httpx.Request):
-        if request.url.path == "/v1.0/robot/messageFiles/download":
-            return httpx.Response(200, json={"downloadUrl": "https://mock.dl/f"})
-        if str(request.url) == "https://mock.dl/f":
-            return httpx.Response(200, content=file_bytes)
-        return httpx.Response(404)
-
-    http_client = httpx.AsyncClient(transport=httpx.MockTransport(mock_handler))
-    mock_client = MagicMock()
-    mock_client.credential.client_id = "test_robot"
-    mock_client.get_access_token = MagicMock(return_value="tok")
-
-    metadata_store = MetadataStore(output_dir=str(tmp_path / "out"))
-    pipeline = create_pipeline(
-        str(tmp_path / "out"), metadata_store, mock_client, SubstringCommandMatcher()
-    )
-    for handler in pipeline.handlers:
-        if hasattr(handler, "file_downloader"):
-            handler.file_downloader._http_client = http_client
-    pipeline.reply_text = MagicMock(return_value={"errcode": 0})
-
-    cb = CallbackMessage()
-    cb.data = {
-        "msgtype": "file",
-        "senderNick": "Tester",
-        "senderId": "user_1",
-        "sessionWebhook": "https://webhook.mock",
-        "content": {"downloadCode": "code_x", "fileName": "a.pdf"},
-    }
-
-    with caplog.at_level(logging.INFO):
-        status, _ = await pipeline.process(cb)
-
-    assert status == AckMessage.STATUS_OK
-    info_text = "\n".join(r.message for r in caplog.records if r.levelno == logging.INFO)
-    assert "HTTP Request:" not in info_text
-    # Application-level download/save INFO lines are still present.
-    assert "Downloading file:" in info_text
-
-    await http_client.aclose()

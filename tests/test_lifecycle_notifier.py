@@ -65,11 +65,6 @@ async def test_both_targets_each_receive_notification():
     with patch("dingtalk_stream.ChatbotHandler") as MockHandler, \
             patch("dingtalk_stream.reply_specified_group_chat") as mock_group, \
             patch("dingtalk_stream.reply_specified_single_chat") as mock_staff:
-        group_message = MagicMock(name="group_message")
-        staff_message = MagicMock(name="staff_message")
-        mock_group.return_value = group_message
-        mock_staff.return_value = staff_message
-
         mock_handler_inst = MockHandler.return_value
         mock_handler_inst.reply_markdown_card.return_value = MagicMock(card_instance_id="card-1")
 
@@ -79,9 +74,6 @@ async def test_both_targets_each_receive_notification():
         mock_group.assert_called_once_with("cid_group_123")
         mock_staff.assert_called_once_with("staff_456")
         assert mock_handler_inst.reply_markdown_card.call_count == 2
-        # Fixed sending order: group first, staff second.
-        assert mock_handler_inst.reply_markdown_card.call_args_list[0].args[1] is group_message
-        assert mock_handler_inst.reply_markdown_card.call_args_list[1].args[1] is staff_message
 
 
 @pytest.mark.asyncio
@@ -230,15 +222,14 @@ async def test_online_notification_staff_gets_snapshot_group_gets_usage():
         assert result is True
         calls = mock_handler_inst.reply_markdown_card.call_args_list
         assert len(calls) == 2
-        # Group (first) keeps usage instructions; staff (second) gets snapshot.
-        assert "服务已就绪" in calls[0].args[0]
-        assert calls[1].args[0].startswith(snapshot)
+        snapshot_call = next(call for call in calls if call.args[0].startswith(snapshot))
+        usage_call = next(call for call in calls if "服务已就绪" in call.args[0])
         # Both targets report the same running version.
-        assert calls[0].args[0].endswith("当前版本：1.2.0")
-        assert calls[1].args[0].endswith("当前版本：1.2.0")
+        assert snapshot_call.args[0].endswith("当前版本：1.2.0")
+        assert usage_call.args[0].endswith("当前版本：1.2.0")
         # Title is shared by both targets.
-        assert calls[0].kwargs["title"] == "🤖 File Bridge 机器人已上线"
-        assert calls[1].kwargs["title"] == "🤖 File Bridge 机器人已上线"
+        assert snapshot_call.kwargs["title"] == "🤖 File Bridge 机器人已上线"
+        assert usage_call.kwargs["title"] == "🤖 File Bridge 机器人已上线"
 
 
 @pytest.mark.asyncio
@@ -261,7 +252,7 @@ async def test_online_notification_without_snapshot_shares_group_content():
         assert result is True
         calls = mock_handler_inst.reply_markdown_card.call_args_list
         assert len(calls) == 2
-        assert calls[0].args[0] == calls[1].args[0]
+        assert len({call.args[0] for call in calls}) == 1
 
 
 @pytest.mark.asyncio

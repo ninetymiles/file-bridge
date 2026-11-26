@@ -767,6 +767,7 @@ class PipelineHandler(dingtalk_stream.ChatbotHandler):
         logger: Optional[logging.Logger] = None,
         storage_probe: Optional[Callable[[], None]] = None,
         wake_warmup: Optional[Callable[[], Awaitable[None]]] = None,
+        warmup_delay: float = 3.0,
     ):
         super().__init__()
         self.handlers: List[BaseMessageHandler] = handlers or []
@@ -780,6 +781,9 @@ class PipelineHandler(dingtalk_stream.ChatbotHandler):
         # Optional fire-and-forget model preload, started alongside the
         # cold-disk notice. The callback owns its own failure handling.
         self.wake_warmup = wake_warmup
+        # Wake-notice timer. Production keeps the fixed 3.0s threshold; tests
+        # shorten it through this constructor argument.
+        self.warmup_delay = warmup_delay
         self._warmup_tasks: set[asyncio.Task] = set()
         # Shutdown drain state: in-flight SDK message tasks (set of asyncio.Task).
         # Each message runs in its own SDK-created task; process() registers it.
@@ -794,6 +798,10 @@ class PipelineHandler(dingtalk_stream.ChatbotHandler):
         ensure_storage_ready while the storage probe may still be waking a
         cold disk; a synchronous local log I/O must not delay the
         user-facing send, so logging happens after to_thread returns.
+
+        Do NOT move the log call before the send. The send-before-log order
+        is a contract recorded in the storage-warmup spec; no automated test
+        asserts it, so this comment is the guard against silent regressions.
         """
         result = await asyncio.to_thread(self.reply_text, text, incoming_message)
 
@@ -963,8 +971,15 @@ class PipelineHandler(dingtalk_stream.ChatbotHandler):
         # loop (and the warmup timer itself) on a sleeping disk. The warmup
         # notice and the unavailable notice are sent by the Dispatcher
         # directly, outside the intent model.
+        #
+        # Two orderings are easy to confuse here. This one is probe-before-log
+        # (event-loop and timer latency). The other is send-before-log for each
+        # user-facing notice (cold-disk log I/O must not delay the reply);
+        # async_reply_text owns that order internally.
         def on_waking() -> Awaitable[None]:
             # Fire-and-forget: the wakeup notice must not wait for the preload.
+            # The notice leaves through async_reply_text, which logs only after
+            # the DingTalk send returns; keep that order.
             if self.wake_warmup is not None:
                 task = asyncio.create_task(self.wake_warmup())
                 self._warmup_tasks.add(task)
@@ -975,6 +990,7 @@ class PipelineHandler(dingtalk_stream.ChatbotHandler):
             await ensure_storage_ready(
                 probe=self.storage_probe,
                 on_waking=on_waking,
+                delay=self.warmup_delay,
             )
         except Exception as e:
             self.logger.error(f"Storage warmup probe failed: {e}", exc_info=True)

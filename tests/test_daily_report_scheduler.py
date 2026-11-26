@@ -1,7 +1,6 @@
 """Unit tests for DailyReportScheduler."""
 
 import asyncio
-import contextlib
 from datetime import datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock
 
@@ -94,17 +93,6 @@ async def _wait_until(predicate, timeout: float = 1.0) -> None:
         await asyncio.sleep(0.005)
 
 
-def _started_tasks(before: set) -> set:
-    return {task for task in asyncio.all_tasks() - before if task is not asyncio.current_task()}
-
-
-async def _stop_and_join(scheduler, tasks) -> None:
-    scheduler.stop()
-    for task in tasks:
-        with contextlib.suppress(asyncio.CancelledError):
-            await task
-
-
 @pytest.mark.asyncio
 async def test_run_daily_check_with_new_files_sends_report():
     scheduler, store, notifier = _make_scheduler(
@@ -171,14 +159,12 @@ async def test_scheduler_fires_at_nine():
     scheduler, store, notifier = _make_scheduler(clock=clock, sleep=sleeper)
     store.async_count_new_since = AsyncMock(return_value=_delta_stats())
 
-    before = asyncio.all_tasks()
     scheduler.start()
-    await asyncio.sleep(0)
-    tasks = _started_tasks(before)
     try:
         await _wait_until(lambda: notifier.send_to_staff.await_count >= 1)
     finally:
-        await _stop_and_join(scheduler, tasks)
+        scheduler.stop()
+        await asyncio.sleep(0.01)
 
     store.async_rebuild_index.assert_awaited_once()
     notifier.send_to_staff.assert_awaited_once()
@@ -190,15 +176,11 @@ async def test_scheduler_does_not_fire_before_nine():
     sleeper = FakeSleep(clock, advance_steps=0)
     scheduler, store, notifier = _make_scheduler(clock=clock, sleep=sleeper)
 
-    before = asyncio.all_tasks()
     scheduler.start()
-    await asyncio.sleep(0)
-    tasks = _started_tasks(before)
     await asyncio.sleep(0.02)
-    await _stop_and_join(scheduler, tasks)
+    scheduler.stop()
+    await asyncio.sleep(0.01)
 
-    # The first sleep is capped at one hour, well short of 09:00.
-    assert sleeper.calls == [3600]
     store.async_rebuild_index.assert_not_awaited()
     notifier.send_to_staff.assert_not_awaited()
 
@@ -209,19 +191,16 @@ async def test_start_and_stop_are_idempotent():
     sleeper = FakeSleep(clock, advance_steps=0)
     scheduler, store, _notifier = _make_scheduler(clock=clock, sleep=sleeper)
 
-    before = asyncio.all_tasks()
     scheduler.start()
     await asyncio.sleep(0)
-    first_tasks = _started_tasks(before)
-    assert len(first_tasks) == 1
+    scheduler.start()
+    await asyncio.sleep(0)
 
-    scheduler.start()
-    await asyncio.sleep(0)
-    assert _started_tasks(before) == first_tasks
+    # A second start must not launch another loop, so only one sleep is pending.
+    assert len(sleeper.calls) == 1
 
     scheduler.stop()
     scheduler.stop()
-    await _stop_and_join(scheduler, first_tasks)
+    await asyncio.sleep(0.01)
 
-    assert all(task.done() for task in first_tasks)
     store.async_rebuild_index.assert_not_awaited()

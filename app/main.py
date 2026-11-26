@@ -192,13 +192,15 @@ def create_pipeline(
     logger: Optional[logging.Logger] = None,
     reviewer: Optional[PhotoReviewer] = None,
     wake_warmup: Optional[Callable[[], Awaitable[None]]] = None,
+    file_downloader: Optional[FileDownloader] = None,
 ) -> PipelineHandler:
     """Construct and configure the message pipeline with handlers."""
-    file_downloader = FileDownloader(
-        output_dir=output_dir,
-        dingtalk_client=dingtalk_client,
-        logger=logger,
-    )
+    if file_downloader is None:
+        file_downloader = FileDownloader(
+            output_dir=output_dir,
+            dingtalk_client=dingtalk_client,
+            logger=logger,
+        )
 
     command_logger = logger if logger is not None else logging.getLogger("file-bridge")
 
@@ -281,16 +283,16 @@ def log_startup_summary(config: argparse.Namespace, logger: logging.Logger) -> N
     )
 
 
-class _ReviewGate:
+class ReviewGate:
     """Mutable startup flag shared by the probe hook and the warmup trigger."""
 
     def __init__(self) -> None:
         self.ready = False
 
 
-def _build_wake_warmup(
+def build_wake_warmup(
     review_config: Optional[ReviewConfig],
-    gate: _ReviewGate,
+    gate: ReviewGate,
     logger: logging.Logger,
 ) -> Callable[[], Awaitable[None]]:
     """Bind the cold-disk preload to the startup probe's enable decision."""
@@ -339,11 +341,11 @@ def main(args=None):
             logger=review_logger,
         )
 
-    review_gate = _ReviewGate()
+    review_gate = ReviewGate()
     pipeline = create_pipeline(
         config.output_dir, metadata_store, client, matcher, logger,
         reviewer=reviewer,
-        wake_warmup=_build_wake_warmup(review_config, review_gate, review_logger),
+        wake_warmup=build_wake_warmup(review_config, review_gate, review_logger),
     )
     client.register_callback_handler(dingtalk_stream.chatbot.ChatbotMessage.TOPIC, pipeline)
 

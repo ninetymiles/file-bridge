@@ -7,10 +7,8 @@ from app.handlers import CommandHandler, PipelineHandler, ReplyTier
 from app.services.command_matching import INDEX_REPORT
 from app.handlers.message import (
     CAPABILITY_VARIANTS,
-    GUIDE_BODY_TEMPLATES,
     GUIDE_ENDING_TEXTS,
     UNMATCHED_PREFIX_TEXTS,
-    build_guide_reply,
 )
 
 
@@ -267,27 +265,39 @@ async def test_command_handler_text_only_richtext_gets_guide():
     assert any(reply.startswith(prefix) for prefix in UNMATCHED_PREFIX_TEXTS)
 
 
-def test_build_guide_reply_with_text_keeps_dimension_order(monkeypatch):
-    # Deterministic pick: every random.choice returns the first candidate,
-    # so the exact assembled string can be asserted (prefix-body-ending).
-    monkeypatch.setattr("app.handlers.message.random.choice", lambda seq: seq[0])
+@pytest.mark.asyncio
+async def test_unmatched_text_guide_has_prefix_and_all_capabilities():
+    handler, matcher, action, pipeline = _handler(None)
+    raw_data = {"msgtype": "text", "text": {"content": "随便聊聊"}}
+    msg = ChatbotMessage.from_dict(raw_data)
 
-    lines = [f"• {variants[0]}" for variants in CAPABILITY_VARIANTS]
-    lines[-1] = f"{lines[-1]}。"
-    expected = (
-        f"{UNMATCHED_PREFIX_TEXTS[0]}{GUIDE_BODY_TEMPLATES[0].format(caps=chr(10).join(lines))}"
-        f"\n{GUIDE_ENDING_TEXTS[0]}"
-    )
+    handled = await handler.handle(msg, raw_data, pipeline)
 
-    assert build_guide_reply(has_real_text=True) == expected
+    assert handled is not None
+    assert handled.tier == ReplyTier.SECONDARY
+    assert any(handled.text.startswith(prefix) for prefix in UNMATCHED_PREFIX_TEXTS)
+    assert handled.text.count("• ") == len(CAPABILITY_VARIANTS)
+    assert handled.text.endswith(tuple(GUIDE_ENDING_TEXTS))
+    assert matcher.received_texts == ["随便聊聊"]
+    action.assert_not_awaited()
 
 
-def test_build_guide_reply_empty_text_has_no_prefix(monkeypatch):
-    monkeypatch.setattr("app.handlers.message.random.choice", lambda seq: seq[0])
+@pytest.mark.asyncio
+async def test_unmatched_empty_text_guide_has_no_prefix():
+    handler, matcher, action, pipeline = _handler(None)
+    raw_data = {
+        "msgtype": "richText",
+        "content": {"richText": [{"text": "@FileBridge"}]},
+    }
+    msg = ChatbotMessage.from_dict(raw_data)
 
-    reply = build_guide_reply(has_real_text=False)
+    handled = await handler.handle(msg, raw_data, pipeline)
 
-    assert not reply.startswith(tuple(UNMATCHED_PREFIX_TEXTS))
-    assert reply.startswith(GUIDE_BODY_TEMPLATES[0].split("\n", 1)[0])
-    assert reply.endswith(GUIDE_ENDING_TEXTS[0])
+    assert handled is not None
+    assert handled.tier == ReplyTier.SECONDARY
+    assert not handled.text.startswith(tuple(UNMATCHED_PREFIX_TEXTS))
+    assert handled.text.count("• ") == len(CAPABILITY_VARIANTS)
+    assert handled.text.endswith(tuple(GUIDE_ENDING_TEXTS))
+    assert matcher.received_texts == []
+    action.assert_not_awaited()
 
