@@ -785,8 +785,9 @@ class PipelineHandler(dingtalk_stream.ChatbotHandler):
         # shorten it through this constructor argument.
         self.warmup_delay = warmup_delay
         self._warmup_tasks: set[asyncio.Task] = set()
-        # Shutdown drain state: in-flight SDK message tasks (set of asyncio.Task).
-        # Each message runs in its own SDK-created task; process() registers it.
+        # Shutdown drain state: in-flight background dispatch tasks. process()
+        # creates the task that runs _dispatch, adds it here and unregisters it
+        # from the completion callback.
         self._draining = False
         self._active_tasks: set[asyncio.Task] = set()
 
@@ -825,7 +826,7 @@ class PipelineHandler(dingtalk_stream.ChatbotHandler):
         """Close intake and ask every handler to cancel its interruptible tasks.
 
         Non-interruptible work (archive/commit/reply) is never touched; it
-        runs to completion inside the still-registered SDK task.
+        runs to completion inside the still-tracked dispatch task.
         """
         self._draining = True
         for task in list(self._warmup_tasks):
@@ -835,9 +836,9 @@ class PipelineHandler(dingtalk_stream.ChatbotHandler):
         self.logger.info("Intake gate closed; handlers notified to cancel interruptible tasks.")
 
     async def drain_active_tasks(self, timeout: float = 10.0) -> None:
-        """Wait (bounded) for all in-flight SDK message tasks to finish.
+        """Wait (bounded) for all in-flight background dispatch tasks to finish.
 
-        begin_drain() already cancelled interruptible sub-tasks; each SDK
+        begin_drain() already cancelled interruptible sub-tasks; each dispatch
         task then ends either via cancellation-reply or natural completion.
         """
         if not self._active_tasks:
@@ -852,21 +853,40 @@ class PipelineHandler(dingtalk_stream.ChatbotHandler):
             )
 
     async def process(self, callback: CallbackMessage) -> Tuple[int, str]:
-        """Process callback message through the pipeline.
+        """Acknowledge the callback at admission and dispatch processing.
 
-        Shutdown-aware wrapper: after begin_drain() the intake gate acks
-        without processing; every in-flight SDK task registers itself and
-        deregisters in finally, whatever way it ends.
+        The platform's ack window is bounded, so the ack must not wait for the
+        handler chain. Processing runs in a background task tracked by
+        ``_active_tasks``, which keeps the shutdown drain semantics intact:
+        ``begin_drain()`` still gates intake, and ``drain_active_tasks()``
+        still waits for accepted work.
         """
         if self._draining:
             return AckMessage.STATUS_OK, "OK"
 
-        task = asyncio.current_task()
+        task = asyncio.create_task(self._dispatch(callback))
         self._active_tasks.add(task)
-        try:
-            return await self._dispatch(callback)
-        finally:
-            self._active_tasks.discard(task)
+        task.add_done_callback(self._on_dispatch_done)
+        return AckMessage.STATUS_OK, "OK"
+
+    def _on_dispatch_done(self, task: asyncio.Task) -> None:
+        """Untrack a finished dispatch task and retrieve its exception.
+
+        Fire-and-forget tasks lose the SDK's exception logging, so the
+        exception must be retrieved here; otherwise it would surface only as
+        "Task exception was never retrieved" at garbage collection.
+        """
+        self._active_tasks.discard(task)
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is not None:
+            self.logger.error(
+                "Background message processing failed (%s): %s",
+                type(exc).__name__,
+                str(exc)[:200],
+                exc_info=exc,
+            )
 
     def _log_received_message(self, message: ChatbotMessage, raw_data: dict) -> None:
         """Emit the INFO metadata summary (with text/richText body) and DEBUG

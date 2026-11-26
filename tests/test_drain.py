@@ -98,17 +98,18 @@ async def test_begin_drain_cancels_interruptible_download_via_handler():
     pipeline = PipelineHandler([downloading])
     pipeline.async_reply_text = AsyncMock()
 
-    task = asyncio.create_task(pipeline.process(make_callback()))
+    await pipeline.process(make_callback())
     await asyncio.wait_for(downloading.download_started.wait(), timeout=1.0)
+    dispatch = next(iter(pipeline._active_tasks))
 
     pipeline.begin_drain()
     await asyncio.wait_for(pipeline.drain_active_tasks(timeout=5.0), timeout=5.0)
 
-    # SDK task ends normally: handler caught the sub-task cancellation,
-    # replied, and returned True. It was NOT cancelled itself.
-    await asyncio.wait_for(task, timeout=1.0)
+    # The dispatch task ends normally: the handler caught the sub-task
+    # cancellation, replied, and returned None. It was NOT cancelled itself.
+    await asyncio.wait_for(dispatch, timeout=1.0)
     assert downloading.replied_cancellation is True
-    assert not task.cancelled()
+    assert not dispatch.cancelled()
 
 
 @pytest.mark.asyncio
@@ -116,16 +117,17 @@ async def test_drain_waits_for_non_interruptible_archive_to_finish():
     archiving = ArchivingHandler()
     pipeline = PipelineHandler([archiving])
 
-    task = asyncio.create_task(pipeline.process(make_callback()))
+    await pipeline.process(make_callback())
     # Let download finish and archive start.
     await asyncio.sleep(0.01)
+    dispatch = next(iter(pipeline._active_tasks))
 
     pipeline.begin_drain()
     await asyncio.wait_for(pipeline.drain_active_tasks(timeout=5.0), timeout=5.0)
 
-    await asyncio.wait_for(task, timeout=1.0)
+    await asyncio.wait_for(dispatch, timeout=1.0)
     assert archiving.archive_finished is True  # archive ran to completion
-    assert not task.cancelled()
+    assert not dispatch.cancelled()
 
 
 @pytest.mark.asyncio
@@ -180,14 +182,15 @@ async def test_drain_timeout_abandons_stuck_task():
 
     pipeline = PipelineHandler([StuckHandler()])
 
-    task = asyncio.create_task(pipeline.process(make_callback()))
+    await pipeline.process(make_callback())
     await asyncio.sleep(0.05)  # let the task park in its sleep
+    dispatch = next(iter(pipeline._active_tasks))
 
     pipeline.begin_drain()
     await asyncio.wait_for(pipeline.drain_active_tasks(timeout=0.05), timeout=1.0)
 
     # Stuck task is still pending: drain could not cancel it.
-    assert not task.done()
-    task.cancel()
+    assert not dispatch.done()
+    dispatch.cancel()
     with pytest.raises(asyncio.CancelledError):
-        await task
+        await dispatch

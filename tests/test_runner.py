@@ -4,7 +4,14 @@ import asyncio
 import signal
 from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
+from dingtalk_stream import CallbackMessage
 from app.core.runner import BotService
+from app.handlers import (
+    BaseMessageHandler,
+    PipelineHandler,
+    ReplyIntent,
+    ReplyTier,
+)
 
 
 @pytest.mark.asyncio
@@ -325,3 +332,85 @@ async def test_startup_hook_failure_does_not_block_start():
 
     service.request_stop("SIGINT")
     await asyncio.wait_for(run_task, timeout=2.0)
+
+
+class _RecordingPipeline:
+    """Minimal pipeline double that records the shutdown hooks' order."""
+
+    def __init__(self, events):
+        self._events = events
+
+    def begin_drain(self):
+        self._events.append("gate")
+
+    async def drain_active_tasks(self, timeout=10.0):
+        self._events.append("drain")
+
+
+@pytest.mark.asyncio
+async def test_stop_closes_connection_before_draining_pipeline():
+    """Spec: intake is closed before in-flight work is drained."""
+    events = []
+
+    async def mock_start():
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            events.append("runner_cancelled")
+            raise
+
+    async def close_websocket():
+        events.append("ws_close")
+
+    client = MagicMock()
+    client.start = mock_start
+    client.websocket = MagicMock()
+    client.websocket.close = close_websocket
+
+    service = BotService(
+        client=client,
+        logger=MagicMock(),
+        pipeline=_RecordingPipeline(events),
+    )
+    await service.start()
+    await asyncio.sleep(0)  # let the runner task enter its wait
+    service.request_stop("SIGINT")
+    await service.stop()
+
+    assert events == ["runner_cancelled", "ws_close", "gate", "drain"]
+
+
+@pytest.mark.asyncio
+async def test_in_flight_message_replies_after_connection_closed():
+    """Spec: a reply is delivered over sessionWebhook, not the websocket."""
+
+    class SlowHandler(BaseMessageHandler):
+        def __init__(self):
+            self.started = asyncio.Event()
+            self.finished = False
+
+        async def handle(self, message, raw_data, pipeline):
+            self.started.set()
+            await asyncio.sleep(0.05)
+            self.finished = True
+            return ReplyIntent(tier=ReplyTier.PRIMARY, text="done")
+
+    handler = SlowHandler()
+    pipeline = PipelineHandler([handler])
+    replies = []
+    pipeline.reply_text = lambda text, _message: replies.append(text) or {"errcode": 0}
+
+    client = MagicMock()
+    client.start = AsyncMock()
+    client.websocket = None  # connection already closed
+
+    service = BotService(client=client, logger=MagicMock(), pipeline=pipeline)
+    callback = CallbackMessage()
+    callback.data = {"msgtype": "text", "text": {"content": "hi"}}
+    await pipeline.process(callback)
+    await asyncio.wait_for(handler.started.wait(), timeout=1.0)
+
+    await service.stop()
+
+    assert handler.finished is True
+    assert replies == ["done"]

@@ -17,6 +17,7 @@ from app.handlers.message import (
     REVIEW_PREFIX,
 )
 from app.services.file_downloader import DownloadResult
+from conftest import process_and_wait
 
 
 class _DelayedReviewer:
@@ -130,8 +131,8 @@ async def test_review_within_window_merges_into_one_reply(tmp_path):
     reviewer = _DelayedReviewer(results=["构图很棒"])
     handler, pipeline, replies = _build_handler(tmp_path, reviewer)
 
-    await pipeline.process(
-        _callback("picture", {"downloadCode": "code-1"})
+    await process_and_wait(
+        pipeline, _callback("picture", {"downloadCode": "code-1"})
     )
     await _wait_for_replies(replies, 1)
 
@@ -149,7 +150,7 @@ async def test_review_after_window_is_sent_as_prefixed_second_message(tmp_path):
         tmp_path, reviewer, merge_window=0.01, review_timeout=1.0
     )
 
-    await pipeline.process(_callback("picture", {"downloadCode": "code-1"}))
+    await process_and_wait(pipeline, _callback("picture", {"downloadCode": "code-1"}))
 
     # The first reply is already delivered and carries no review.
     assert len(replies) == 1
@@ -173,7 +174,7 @@ async def test_review_total_timeout_sends_only_one_reply(tmp_path):
         review_timeout=0.05,
     )
 
-    await pipeline.process(_callback("picture", {"downloadCode": "code-1"}))
+    await process_and_wait(pipeline, _callback("picture", {"downloadCode": "code-1"}))
     await asyncio.wait_for(reviewer.cancelled.wait(), timeout=2.0)
 
     assert reviewer.cancellations == 1
@@ -232,8 +233,9 @@ async def test_review_deadline_is_fixed_at_first_request(tmp_path):
         download=download,
     )
 
-    await pipeline.process(
-        _callback("richText", _rich_text(["c1", "c2"]), conversation_type="2")
+    await process_and_wait(
+        pipeline,
+        _callback("richText", _rich_text(["c1", "c2"]), conversation_type="2"),
     )
     await asyncio.wait_for(reviewer.cancelled.wait(), timeout=2.0)
 
@@ -252,7 +254,7 @@ async def test_review_failure_keeps_the_existing_single_reply(tmp_path):
     reviewer = _DelayedReviewer(results=[None])
     handler, pipeline, replies = _build_handler(tmp_path, reviewer)
 
-    await pipeline.process(_callback("picture", {"downloadCode": "code-1"}))
+    await process_and_wait(pipeline, _callback("picture", {"downloadCode": "code-1"}))
     await _wait_for_replies(replies, 1)
 
     assert len(replies) == 1
@@ -265,8 +267,8 @@ async def test_video_and_file_are_never_reviewed(tmp_path):
     reviewer = _DelayedReviewer(results=["不应出现"])
     handler, pipeline, replies = _build_handler(tmp_path, reviewer)
 
-    await pipeline.process(_callback("video", {"downloadCode": "video-1"}))
-    await pipeline.process(_callback("file", {"downloadCode": "file-1"}))
+    await process_and_wait(pipeline, _callback("video", {"downloadCode": "video-1"}))
+    await process_and_wait(pipeline, _callback("file", {"downloadCode": "file-1"}))
     await _wait_for_replies(replies, 2)
 
     assert len(replies) == 2
@@ -286,8 +288,9 @@ async def test_group_reviews_merge_into_one_labelled_message(tmp_path):
     reviewer = _DelayedReviewer(results=["a", "b", "c"])
     handler, pipeline, replies = _build_handler(tmp_path, reviewer)
 
-    await pipeline.process(
-        _callback("richText", _rich_text(["c1", "c2", "c3"]), conversation_type="2")
+    await process_and_wait(
+        pipeline,
+        _callback("richText", _rich_text(["c1", "c2", "c3"]), conversation_type="2"),
     )
     await _wait_for_replies(replies, 1)
 
@@ -332,8 +335,9 @@ async def test_group_reviews_start_before_later_downloads_finish(tmp_path):
         tmp_path, reviewer, download=download
     )
 
-    await pipeline.process(
-        _callback("richText", _rich_text(["c1", "c2"]), conversation_type="2")
+    await process_and_wait(
+        pipeline,
+        _callback("richText", _rich_text(["c1", "c2"]), conversation_type="2"),
     )
     await _wait_for_replies(replies, 1)
 
@@ -350,8 +354,9 @@ async def test_group_partial_failure_omits_the_failed_image(tmp_path):
         tmp_path, reviewer, merge_window=0.01, review_timeout=1.0
     )
 
-    await pipeline.process(
-        _callback("richText", _rich_text(["c1", "c2", "c3"]), conversation_type="2")
+    await process_and_wait(
+        pipeline,
+        _callback("richText", _rich_text(["c1", "c2", "c3"]), conversation_type="2"),
     )
     await _wait_for_replies(replies, 2)
 
@@ -370,8 +375,9 @@ async def test_group_all_failures_send_no_followup(tmp_path):
         tmp_path, reviewer, merge_window=0.01, review_timeout=1.0
     )
 
-    await pipeline.process(
-        _callback("richText", _rich_text(["c1", "c2"]), conversation_type="2")
+    await process_and_wait(
+        pipeline,
+        _callback("richText", _rich_text(["c1", "c2"]), conversation_type="2"),
     )
     await _wait_for_replies(replies, 1)
 
@@ -384,8 +390,9 @@ async def test_group_without_saved_images_starts_no_review(tmp_path):
     reviewer = _DelayedReviewer(results=["a"])
     handler, pipeline, replies = _build_handler(tmp_path, reviewer)
 
-    await pipeline.process(
-        _callback("richText", {"richText": [{"text": "只发文字"}]}, conversation_type="2")
+    await process_and_wait(
+        pipeline,
+        _callback("richText", {"richText": [{"text": "只发文字"}]}, conversation_type="2"),
     )
 
     assert replies == []
@@ -399,7 +406,7 @@ async def test_group_without_saved_images_starts_no_review(tmp_path):
 async def test_disabled_review_keeps_single_reply(tmp_path):
     handler, pipeline, replies = _build_handler(tmp_path, reviewer=None)
 
-    await pipeline.process(_callback("picture", {"downloadCode": "code-1"}))
+    await process_and_wait(pipeline, _callback("picture", {"downloadCode": "code-1"}))
 
     assert len(replies) == 1
     assert "文件接收成功，已保存为:" in replies[0]
@@ -411,7 +418,7 @@ async def test_disable_review_stops_reviews_after_probe_failure(tmp_path):
     handler, pipeline, replies = _build_handler(tmp_path, reviewer)
 
     handler.disable_review()
-    await pipeline.process(_callback("picture", {"downloadCode": "code-1"}))
+    await process_and_wait(pipeline, _callback("picture", {"downloadCode": "code-1"}))
     await _wait_for_replies(replies, 1)
 
     assert len(replies) == 1
@@ -426,7 +433,7 @@ async def test_cancel_tasks_drops_the_deferred_review(tmp_path):
         tmp_path, reviewer, merge_window=0.01, review_timeout=5.0
     )
 
-    await pipeline.process(_callback("picture", {"downloadCode": "code-1"}))
+    await process_and_wait(pipeline, _callback("picture", {"downloadCode": "code-1"}))
     assert len(replies) == 1
 
     handler.cancel_tasks()

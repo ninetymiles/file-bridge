@@ -29,10 +29,10 @@ class BotService:
     - :meth:`start`: run an optional startup hook, construct the runtime, send
       online notification, launch the SDK background task and register
       ``SIGINT``/``SIGTERM`` handlers.
-    - :meth:`stop`: run the graceful shutdown sequence (close the pipeline
-      intake gate and drain in-flight message tasks with a bounded wait ->
-      ``runner_task.cancel()`` with a bounded wait -> fire-and-forget
-      offline notify -> close ws).
+    - :meth:`stop`: run the graceful shutdown sequence (cancel the SDK runner
+      and close the websocket -> close the pipeline intake gate and drain
+      in-flight message tasks with a bounded wait -> fire-and-forget offline
+      notify).
 
     Callers may also use :meth:`start_and_wait` for the convenience of waiting
     until a stop signal arrives, or :meth:`run_forever` for a synchronous
@@ -111,21 +111,27 @@ class BotService:
 
         Order is significant:
 
-        1. Close the pipeline intake gate and drain in-flight message tasks:
+        1. ``runner_task.cancel()`` stops the SDK read loop and the websocket
+           context closes; a defensive close follows so the connection is gone
+           before the intake gate is set. Await with a 1s bounded timeout: a
+           grace period for network close, not for the SDK's internal
+           reconnect sleep.
+        2. Close the pipeline intake gate and drain in-flight message tasks:
            tasks before their download point are cancelled (they reply
            "cancelled" themselves); tasks past it finish saving, committing
-           and replying naturally. Bounded 10s wait — it returns as soon as
+           and replying naturally over ``sessionWebhook``, which does not
+           depend on the websocket. Bounded 10s wait — it returns as soon as
            all tasks finish, the timeout is only a safety ceiling.
-        2. ``runner_task.cancel()`` - cancel the SDK task; the websocket
-           closes when the SDK's connection context exits on cancellation.
-           Await with a 1s bounded timeout: a grace period for network close,
-           not for the SDK's internal reconnect sleep.
         3. Fire-and-forget offline notification - failure must not block
            shutdown.
-        4. Close websocket if still open (defensive).
-        5. Brief ``await asyncio.sleep(0.1)`` to give the event loop a chance
+        4. Brief ``await asyncio.sleep(0.1)`` to give the event loop a chance
            to schedule the fire-and-forget notification task before the loop
            tears down.
+
+        Closing the connection before draining is deliberate: every accepted
+        message is already acknowledged at admission, so this order makes an
+        ack undeliverable for anything the process will not handle, letting
+        the platform re-deliver it after reconnect instead of losing it.
 
         Calling :meth:`stop` again after a successful stop returns
         immediately without re-running the shutdown sequence.
@@ -142,14 +148,7 @@ class BotService:
         if self.scheduler:
             self.scheduler.stop()
 
-        # 1. Gate + drain: stop accepting new messages, then settle in-flight
-        #    ones before touching the websocket. Keeps the ws open on purpose:
-        #    acks for gated/interrupted messages still reach the platform.
-        if self.pipeline:
-            self.pipeline.begin_drain()
-            await self.pipeline.drain_active_tasks(timeout=10.0)
-
-        # 2. Cancel the runner task; the websocket closes when the SDK's
+        # 1. Cancel the runner task; the websocket closes when the SDK's
         #    connection context exits on cancellation. The bounded wait is a
         #    grace period for network close, not for the SDK's internal
         #    reconnect sleep.
@@ -165,18 +164,27 @@ class BotService:
             except (asyncio.CancelledError, Exception):
                 pass
 
-        # 3. Fire-and-forget offline notification.
-        if self.notifier:
-            asyncio.create_task(self.notifier.send_offline_notification())
-
-        # 4. Close websocket if still open (defensive).
+        # Close websocket if still open. This must happen before draining:
+        # the ack of a message the process will not handle must fail at the
+        # wire so the platform re-delivers it after reconnect.
         if hasattr(self.client, "websocket") and self.client.websocket is not None:
             try:
                 await self.client.websocket.close()
             except Exception as e:
                 self.logger.debug("Exception while closing websocket (ignored): %s", e)
 
-        # 5. Give the event loop a moment to start the fire-and-forget
+        # 2. Gate + drain: stop accepting new messages (none can arrive now),
+        #    then settle in-flight ones. Replies use sessionWebhook HTTP, so
+        #    they survive the closed websocket.
+        if self.pipeline:
+            self.pipeline.begin_drain()
+            await self.pipeline.drain_active_tasks(timeout=10.0)
+
+        # 3. Fire-and-forget offline notification.
+        if self.notifier:
+            asyncio.create_task(self.notifier.send_offline_notification())
+
+        # 4. Give the event loop a moment to start the fire-and-forget
         #    notification task before asyncio.run() tears down the loop.
         await asyncio.sleep(0.1)
 

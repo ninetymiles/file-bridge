@@ -24,6 +24,7 @@ from app.handlers.message import (
     STORAGE_UNAVAILABLE_TEXT,
     WAKING_STORAGE_TEXT,
 )
+from conftest import process_and_wait
 
 
 @pytest.mark.asyncio
@@ -84,7 +85,7 @@ async def test_end_to_end_file_and_rebuild_index_pipeline(tmp_path):
         },
     }
 
-    status, msg = await pipeline.process(cb_msg1)
+    status, msg = await process_and_wait(pipeline, cb_msg1)
     assert status == AckMessage.STATUS_OK
     assert len(replies) == 1
     assert "文件接收成功，已保存为:" in replies[0][0]
@@ -106,7 +107,7 @@ async def test_end_to_end_file_and_rebuild_index_pipeline(tmp_path):
         },
     }
 
-    status, msg = await pipeline.process(cb_msg2)
+    status, msg = await process_and_wait(pipeline, cb_msg2)
     assert status == AckMessage.STATUS_OK
     assert len(replies) == 2
     assert replies[1][0] == "文件已存在，请勿重复发送"
@@ -129,7 +130,7 @@ async def test_end_to_end_file_and_rebuild_index_pipeline(tmp_path):
         "text": {"content": "重建索引"},
     }
 
-    status, msg = await pipeline.process(cb_msg3)
+    status, msg = await process_and_wait(pipeline, cb_msg3)
     assert status == AckMessage.STATUS_OK
     assert len(replies) == 3
     assert "索引重建完成，清理元数据 1 条，现有有效索引 0 条。" in replies[2][0]
@@ -150,7 +151,7 @@ async def test_end_to_end_file_and_rebuild_index_pipeline(tmp_path):
         },
     }
 
-    status, msg = await pipeline.process(cb_msg4)
+    status, msg = await process_and_wait(pipeline, cb_msg4)
     assert status == AckMessage.STATUS_OK
     # One merged reply: PRIMARY tier wins, command result + image save result merged
     assert len(replies) == 4
@@ -167,7 +168,7 @@ async def test_end_to_end_file_and_rebuild_index_pipeline(tmp_path):
         "text": {"content": "hello world"},
     }
 
-    status, msg = await pipeline.process(cb_msg5)
+    status, msg = await process_and_wait(pipeline, cb_msg5)
     assert status == AckMessage.STATUS_OK
     assert len(replies) == 5
     # Guidance reply contract: a single message whose capability list has
@@ -193,7 +194,7 @@ async def test_end_to_end_file_and_rebuild_index_pipeline(tmp_path):
         },
     }
 
-    status, msg = await pipeline.process(cb_msg6)
+    status, msg = await process_and_wait(pipeline, cb_msg6)
     assert status == AckMessage.STATUS_OK
     assert len(replies) == 6
     assert "文件已存在，请勿重复发送" in replies[5][0] or "文件接收成功，已保存为:" in replies[5][0]
@@ -210,7 +211,7 @@ async def test_end_to_end_file_and_rebuild_index_pipeline(tmp_path):
         "content": {"downloadCode": "code_audio", "duration": 1000},
     }
 
-    status, msg = await pipeline.process(cb_msg7)
+    status, msg = await process_and_wait(pipeline, cb_msg7)
     assert status == AckMessage.STATUS_OK
     assert len(replies) == 7
     assert "语音消息" in replies[6][0] and "不支持" in replies[6][0]
@@ -225,7 +226,7 @@ async def test_end_to_end_file_and_rebuild_index_pipeline(tmp_path):
         "conversationType": "1",
     }
 
-    status, msg = await pipeline.process(cb_msg8)
+    status, msg = await process_and_wait(pipeline, cb_msg8)
     assert status == AckMessage.STATUS_OK
     assert len(replies) == 8
     assert "不支持" in replies[7][0]
@@ -241,7 +242,7 @@ async def test_end_to_end_file_and_rebuild_index_pipeline(tmp_path):
         "content": {},
     }
 
-    status, msg = await pipeline.process(cb_msg9)
+    status, msg = await process_and_wait(pipeline, cb_msg9)
     assert status == AckMessage.STATUS_OK
     assert len(replies) == 9
     assert "不支持" in replies[8][0]
@@ -257,7 +258,7 @@ async def test_end_to_end_file_and_rebuild_index_pipeline(tmp_path):
         "content": {"downloadCode": "code_audio"},
     }
 
-    status, msg = await pipeline.process(cb_msg10)
+    status, msg = await process_and_wait(pipeline, cb_msg10)
     assert status == AckMessage.STATUS_OK
     assert len(replies) == 9  # no new reply
 
@@ -304,7 +305,7 @@ async def test_index_report_command_returns_totals_and_latest_day(tmp_path):
         "text": {"content": "索引统计"},
     }
 
-    status, _ = await pipeline.process(cb)
+    status, _ = await process_and_wait(pipeline, cb)
 
     assert status == AckMessage.STATUS_OK
     assert len(replies) == 1
@@ -346,7 +347,7 @@ def _build_warmup_pipeline(tmp_path, wake_warmup=None, file_downloader=None):
 def _send(pipeline, data):
     callback = CallbackMessage()
     callback.data = data
-    return pipeline.process(callback)
+    return process_and_wait(pipeline, callback)
 
 
 _BASE_DATA = {
@@ -618,4 +619,59 @@ async def test_wake_warmup_waits_for_probe_ready(monkeypatch):
     # Review not configured at all: the gate alone must not trigger a request.
     silent = main_module.build_wake_warmup(None, gate, logger)
     await silent()
-    assert calls == ["test-model"]
+
+
+@pytest.mark.asyncio
+async def test_slow_multi_image_richtext_acks_before_processing(tmp_path):
+    """Regression: slow multi-image richText must not be processed twice.
+
+    The ack returns at admission; the merged reply appears only after the
+    background chain finishes, and the duplicate-file reply never appears.
+    """
+    downloads = []
+
+    async def slow_download(request: httpx.Request):
+        if request.url.path == "/v1.0/robot/messageFiles/download":
+            return httpx.Response(200, json={"downloadUrl": "https://mock.dl/slow"})
+        await asyncio.sleep(0.05)
+        downloads.append(str(request.url))
+        return httpx.Response(200, content=b"img-" + str(len(downloads)).encode())
+
+    http_client = httpx.AsyncClient(transport=httpx.MockTransport(slow_download))
+    download_client = MagicMock()
+    download_client.credential.client_id = "test_robot"
+    download_client.get_access_token = MagicMock(return_value="mock_access_token")
+    file_downloader = FileDownloader(
+        output_dir=str(tmp_path / "warmup_output"),
+        dingtalk_client=download_client,
+        http_client=http_client,
+    )
+    pipeline, _, replies = _build_warmup_pipeline(
+        tmp_path, file_downloader=file_downloader
+    )
+
+    callback = CallbackMessage()
+    callback.data = {
+        **_BASE_DATA,
+        "msgtype": "richText",
+        "content": {
+            "richText": [
+                {"type": "picture", "downloadCode": "c1"},
+                {"type": "picture", "downloadCode": "c2"},
+                {"type": "picture", "downloadCode": "c3"},
+            ]
+        },
+    }
+
+    status, _ = await pipeline.process(callback)
+
+    assert status == AckMessage.STATUS_OK
+    assert replies == []  # acknowledged before the downloads started
+
+    await pipeline.drain_active_tasks(timeout=10.0)
+
+    assert len(downloads) == 3
+    assert len(replies) == 1
+    assert replies[0].count("文件接收成功") == 3
+    assert "文件已存在，请勿重复发送" not in replies[0]
+    await http_client.aclose()

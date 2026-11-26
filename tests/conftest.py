@@ -32,6 +32,18 @@ if "fastembed" not in sys.modules:
 SPECIAL_MARKERS = {"semantic"}
 
 
+async def process_and_wait(pipeline, callback):
+    """Deliver one callback and wait until its background processing ends.
+
+    ``PipelineHandler.process()`` acknowledges at admission and dispatches the
+    handler chain as a background task, so tests that assert replies must join
+    that task before checking them.
+    """
+    result = await pipeline.process(callback)
+    await pipeline.drain_active_tasks(timeout=10.0)
+    return result
+
+
 def pytest_collection_modifyitems(config, items):
     if config.getoption("markexpr", "").strip() != "general":
         return
