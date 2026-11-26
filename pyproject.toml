@@ -1,6 +1,6 @@
 [project]
 name = "file-bridge"
-version = "1.3.0"
+version = "1.3.1"
 requires-python = ">=3.14"
 dependencies = [
     "dingtalk-stream>=0.24.3",
