@@ -69,12 +69,17 @@ class ReplyIntent:
     after_reply: Optional[Callable[[], None]] = None
 
 
-def _format_reviews(reviews: dict[int, str]) -> Optional[str]:
-    """Render collected reviews, labelled by image order when there are many."""
+def _format_reviews(reviews: dict[int, str], numbered: bool) -> Optional[str]:
+    """Render the collected reviews.
+
+    ``numbered`` labels each review with its image order; it is driven by the
+    inbound message's picture count, not by how many reviews came back, because
+    a message now yields at most one review.
+    """
     entries = [(index, text) for index, text in sorted(reviews.items()) if text]
     if not entries:
         return None
-    if len(entries) == 1:
+    if not numbered:
         return entries[0][1]
     return "\n".join(f"图{index}：{text}" for index, text in entries)
 
@@ -550,19 +555,21 @@ class MediaFileHandler(BaseMessageHandler):
         batch: Optional[_ReviewBatch],
         incoming_message: ChatbotMessage,
         pipeline: "PipelineHandler",
+        numbered: bool = False,
     ) -> ReplyIntent:
         """Merge reviews into the first reply, or defer them to a follow-up.
 
         The first reply is always returned as an intent so it keeps merging
         with other handlers' intents. When the window expires, a gated task is
         released only after the pipeline has sent that reply, which guarantees
-        the review can never arrive first.
+        the review can never arrive first. ``numbered`` labels the review with
+        its image order when the inbound message carried several pictures.
         """
         if batch is None:
             return ReplyIntent(tier=ReplyTier.PRIMARY, text=reply_text)
 
         reviews, pending = await batch.wait(self.review_merge_window)
-        block = _format_reviews(reviews)
+        block = _format_reviews(reviews, numbered)
         if not pending:
             text = f"{reply_text}\n{block}" if block else reply_text
             return ReplyIntent(tier=ReplyTier.PRIMARY, text=text)
@@ -572,7 +579,7 @@ class MediaFileHandler(BaseMessageHandler):
         async def send_followup() -> None:
             try:
                 await gate.wait()
-                follow_text = _format_reviews(await batch.finish())
+                follow_text = _format_reviews(await batch.finish(), numbered)
                 if not follow_text:
                     return
                 await pipeline.async_reply_text(
@@ -722,9 +729,14 @@ class MediaFileHandler(BaseMessageHandler):
                 msgtype="picture",
             )
             results.append(result)
-            # Start each review as soon as its file is saved, so later
-            # downloads overlap with earlier reviews.
-            if batch is not None and result.status == "saved" and result.saved_path:
+            # Only the first saved photo consumes this message's single
+            # review; duplicates and failed photos are skipped, not retried.
+            if (
+                batch is not None
+                and not batch
+                and result.status == "saved"
+                and result.saved_path
+            ):
                 batch.add(index, result.saved_path)
             if result.status == "cancelled":
                 break
@@ -745,7 +757,11 @@ class MediaFileHandler(BaseMessageHandler):
             else:
                 batch = None
         return await self._reply_with_reviews(
-            "\n".join(reply_lines), batch, message, pipeline
+            "\n".join(reply_lines),
+            batch,
+            message,
+            pipeline,
+            numbered=len(picture_segments) > 1,
         )
 
     async def _download_phase(self, download_code: str):

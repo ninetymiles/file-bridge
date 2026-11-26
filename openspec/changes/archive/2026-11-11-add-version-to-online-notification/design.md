@@ -4,8 +4,8 @@
 
 动机见 proposal.md。当前实现约束：
 
-- 版本注入链路已存在：CI 从 git tag 取版本 → `Dockerfile` 的 `ARG/ENV APP_VERSION` → 运行时 `os.getenv`。[main.py](file:///Users/Liu/github/NinetyMiles/file-bridge/app/main.py#L70-L79) 的 `get_app_version()` 负责空值回退 `dev`。
-- [main.py](file:///Users/Liu/github/NinetyMiles/file-bridge/app/main.py) 已 import `LifecycleNotifier`，通知器反向 import `get_app_version` 会形成循环依赖。
+- 版本注入链路已存在：CI 从 git tag 取版本 → `Dockerfile` 的 `ARG/ENV APP_VERSION` → 运行时 `os.getenv`。`app/main.py` 的 `get_app_version()` 负责空值回退 `dev`。
+- `app/main.py` 已 import `LifecycleNotifier`，通知器反向 import `get_app_version` 会形成循环依赖。
 - `send_online_notification(staff_snapshot)` 对 staff 目标用 `staff_content` 替换正文，群聊目标用用法介绍；两个目标共用同一标题。
 - 所有 `LifecycleNotifier(...)` 构造点均使用关键字参数，在参数列表末尾新增可选参数不破坏调用方；`app/core/runner.py` 只调用 `send_online_notification(staff_snapshot)`，签名无需变化。
 

@@ -55,6 +55,7 @@ def _build_handler(
     review_timeout=5.0,
     logger=None,
     download=None,
+    duplicates=None,
 ):
     output_dir = tmp_path / "output"
     counter = {"n": 0}
@@ -74,7 +75,10 @@ def _build_handler(
     downloader.download_file_stream = download or default_download
 
     store = MagicMock()
-    store.async_is_duplicate = AsyncMock(return_value=False)
+    if duplicates is None:
+        store.async_is_duplicate = AsyncMock(return_value=False)
+    else:
+        store.async_is_duplicate = AsyncMock(side_effect=duplicates)
     store.async_insert_record = AsyncMock(return_value=1)
 
     handler = MediaFileHandler(
@@ -139,6 +143,7 @@ async def test_review_within_window_merges_into_one_reply(tmp_path):
     assert len(replies) == 1
     assert "文件接收成功，已保存为:" in replies[0]
     assert replies[0].endswith("构图很棒")
+    assert "图1：" not in replies[0]
     assert not replies[0].startswith(REVIEW_PREFIX)
     assert len(reviewer.calls) == 1
 
@@ -286,7 +291,19 @@ def _rich_text(segments):
 @pytest.mark.asyncio
 async def test_group_reviews_merge_into_one_labelled_message(tmp_path):
     reviewer = _DelayedReviewer(results=["a", "b", "c"])
-    handler, pipeline, replies = _build_handler(tmp_path, reviewer)
+    counter = {"n": 0}
+
+    async def download(_url):
+        counter["n"] += 1
+        path = tmp_path / f"temp_{counter['n']}.bin"
+        path.write_bytes(f"image-{counter['n']}".encode())
+        return DownloadResult(
+            temp_path=str(path),
+            sha256=f"sha-{counter['n']}",
+            file_size=8,
+        )
+
+    _, pipeline, replies = _build_handler(tmp_path, reviewer, download=download)
 
     await process_and_wait(
         pipeline,
@@ -295,9 +312,49 @@ async def test_group_reviews_merge_into_one_labelled_message(tmp_path):
     await _wait_for_replies(replies, 1)
 
     assert len(replies) == 1
+    assert len(reviewer.calls) == 1
+    # The reviewed photo is the first one saved, i.e. the first picture sent.
+    with open(reviewer.calls[0], "rb") as reviewed:
+        assert reviewed.read() == b"image-1"
     assert "图1：a" in replies[0]
+    assert "图2：" not in replies[0]
+    assert "图3：" not in replies[0]
+    assert REVIEW_PREFIX not in replies[0]
+
+
+@pytest.mark.asyncio
+async def test_group_duplicate_is_skipped_and_next_photo_is_reviewed(tmp_path):
+    reviewer = _DelayedReviewer(results=["b"])
+    _, pipeline, replies = _build_handler(
+        tmp_path, reviewer, duplicates=[True, False]
+    )
+
+    await process_and_wait(
+        pipeline,
+        _callback("richText", _rich_text(["c1", "c2"]), conversation_type="2"),
+    )
+    await _wait_for_replies(replies, 1)
+
+    assert len(reviewer.calls) == 1
+    assert "文件已存在，请勿重复发送" in replies[0]
     assert "图2：b" in replies[0]
-    assert "图3：c" in replies[0]
+    assert "图1：" not in replies[0]
+
+
+@pytest.mark.asyncio
+async def test_group_all_duplicates_send_no_review(tmp_path):
+    reviewer = _DelayedReviewer(results=["a"])
+    _, pipeline, replies = _build_handler(
+        tmp_path, reviewer, duplicates=[True, True, True]
+    )
+
+    await process_and_wait(
+        pipeline,
+        _callback("richText", _rich_text(["c1", "c2", "c3"]), conversation_type="2"),
+    )
+
+    assert len(replies) == 1
+    assert reviewer.calls == []
     assert REVIEW_PREFIX not in replies[0]
 
 
@@ -320,8 +377,8 @@ async def test_group_reviews_start_before_later_downloads_finish(tmp_path):
     async def download(_url):
         counter["n"] += 1
         if counter["n"] == 2:
-            # If reviews only started after the whole batch was saved, this
-            # would deadlock until the timeout.
+            # If the first review only started after the whole batch was
+            # saved, this would deadlock until the timeout.
             await asyncio.wait_for(first_review.wait(), timeout=1.0)
         path = tmp_path / f"temp_{counter['n']}.bin"
         path.write_bytes(b"not really an image")
@@ -341,15 +398,15 @@ async def test_group_reviews_start_before_later_downloads_finish(tmp_path):
     )
     await _wait_for_replies(replies, 1)
 
-    assert len(reviewer.calls) == 2
+    assert len(reviewer.calls) == 1
     assert len(replies) == 1
     assert "图1：ok" in replies[0]
-    assert "图2：ok" in replies[0]
+    assert "图2：" not in replies[0]
 
 
 @pytest.mark.asyncio
 async def test_group_partial_failure_omits_the_failed_image(tmp_path):
-    reviewer = _DelayedReviewer(results=["a", None, "c"], delay=0.1)
+    reviewer = _DelayedReviewer(results=[None, "b", "c"], delay=0.1)
     handler, pipeline, replies = _build_handler(
         tmp_path, reviewer, merge_window=0.01, review_timeout=1.0
     )
@@ -358,14 +415,14 @@ async def test_group_partial_failure_omits_the_failed_image(tmp_path):
         pipeline,
         _callback("richText", _rich_text(["c1", "c2", "c3"]), conversation_type="2"),
     )
-    await _wait_for_replies(replies, 2)
+    assert len(replies) == 1
+    assert REVIEW_PREFIX not in replies[0]
 
-    assert len(replies) == 2
-    followup = replies[1]
-    assert followup.startswith(REVIEW_PREFIX)
-    assert "图1：a" in followup
-    assert "图3：c" in followup
-    assert "图2：" not in followup
+    await asyncio.sleep(0.3)
+
+    # The first saved photo's review failed and no other photo is tried.
+    assert len(replies) == 1
+    assert len(reviewer.calls) == 1
 
 
 @pytest.mark.asyncio
